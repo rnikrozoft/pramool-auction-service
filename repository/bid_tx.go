@@ -68,10 +68,10 @@ func (r auctionRepo) UpsertAuctionBidHold(ctx context.Context, tx bun.Tx, auctio
 	return err
 }
 
-func (r auctionRepo) InsertBidHoldAdjustmentTransaction(ctx context.Context, tx bun.Tx, bidderID, auctionID string, delta, balanceBefore, balanceAfter int64) error {
+func (r auctionRepo) InsertBidHoldAdjustmentTransaction(ctx context.Context, tx bun.Tx, bidderID, auctionID string, delta, balanceBefore, balanceAfter, bidAmount int64) error {
 	_, err := tx.ExecContext(ctx, `
-		INSERT INTO bid_transactions (user_id, auction_id, tx_type, amount, balance_before, balance_after, note)
-		VALUES (?, ?, 'bid_hold', ?, ?, ?, 'hold amount adjusted by new bid')
-	`, bidderID, auctionID, delta, balanceBefore, balanceAfter)
+		INSERT INTO bid_transactions (user_id, auction_id, tx_type, amount, balance_before, balance_after, note, bid_amount)
+		VALUES (?, ?, 'bid_hold', ?, ?, ?, 'hold amount adjusted by new bid', ?)
+	`, bidderID, auctionID, delta, balanceBefore, balanceAfter, bidAmount)
 	return err
 }

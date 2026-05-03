@@ -2,12 +2,17 @@ package dto
 
 // AuctionWSMessage is pushed over GET /ws/auctions/:id.
 type AuctionWSMessage struct {
-	Type              string `json:"type"`
-	AuctionID         string `json:"auction_id,omitempty"`
-	BidderID          string `json:"bidder_id,omitempty"`
-	Amount            int64  `json:"amount,omitempty"`
-	CurrentBid        int64  `json:"current_bid,omitempty"`
-	TotalBids         int64  `json:"total_bids,omitempty"`
-	RemainingCredit   int64  `json:"remaining_credit,omitempty"`
-	Message           string `json:"message,omitempty"`
+	Type            string `json:"type"`
+	AuctionID       string `json:"auction_id,omitempty"`
+	BidderID        string `json:"bidder_id,omitempty"`
+	Amount          int64  `json:"amount,omitempty"`
+	CurrentBid      int64  `json:"current_bid,omitempty"`
+	TotalBids       int64  `json:"total_bids,omitempty"`
+	RemainingCredit int64  `json:"remaining_credit,omitempty"`
+	Message         string `json:"message,omitempty"`
+	// auction_state — listing fields (pointers so we omit on bid_ack / bid_update).
+	Status          string `json:"status,omitempty"`
+	EndAt           string `json:"end_at,omitempty"`
+	ReopenEligible  *bool  `json:"reopen_eligible,omitempty"`
+	AllowEarlyClose *bool  `json:"allow_early_close,omitempty"`
 }

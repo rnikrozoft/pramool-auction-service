@@ -47,14 +47,29 @@ func main() {
 	}))
 
 	auctionRepo := repository.NewAuctionRepository(db)
-	auctionSvc := service.NewAuctionService(auctionRepo)
-	auctionHandler := handler.NewAuctionHandler(auctionSvc)
-
+	walletBaseURL := strings.TrimSpace(os.Getenv("WALLET_API_BASE_URL"))
+	if walletBaseURL == "" {
+		walletBaseURL = "http://localhost:3102"
+	}
 	hub := service.NewAuctionHub()
+	auctionSvc := service.NewAuctionService(
+		auctionRepo,
+		walletBaseURL,
+		strings.TrimSpace(os.Getenv("WALLET_INTERNAL_KEY")),
+		hub,
+		strings.TrimSpace(os.Getenv("ESCROW_AUTO_CONFIRM_DAYS")),
+	)
+	auctionHandler := handler.NewAuctionHandler(auctionSvc)
 	rt := handler.NewRealtimeHandler(hub, auctionSvc)
 	m := middleware.Middleware{JWTSecret: jwtSecret}
 
+	app.Get("/auctions", auctionHandler.ListAuctions)
 	app.Get("/auctions/:id", auctionHandler.AuctionDetail)
+	app.Get("/my/active-bids", m.JWTMiddleware, auctionHandler.MyActiveBids)
+	app.Get("/my/bid-history", m.JWTMiddleware, auctionHandler.MyBidHistory)
+	app.Post("/auctions/:id/mark-shipped", m.JWTMiddleware, auctionHandler.MarkSellerShipped)
+	app.Post("/auctions/:id/confirm-received", m.JWTMiddleware, auctionHandler.ConfirmBuyerReceived)
+	app.Post("/auctions/:id/close-early", m.JWTMiddleware, auctionHandler.CloseEarly)
 
 	app.Get("/ws/auctions/:id", m.JWTMiddleware, func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
