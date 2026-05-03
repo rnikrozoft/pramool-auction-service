@@ -8,6 +8,8 @@ import (
 	"github.com/rnikrozoft/pramool-auction-service/model"
 )
 
+const tokenUseRefresh = "refresh"
+
 type Middleware struct {
 	JWTSecret string
 }
@@ -25,6 +27,9 @@ func (m Middleware) JWTMiddleware(c *fiber.Ctx) error {
 	var userID string
 	if err == nil && token.Valid {
 		if claims, ok := token.Claims.(*model.CustomClaims); ok {
+			if strings.EqualFold(claims.TokenUse, tokenUseRefresh) {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"message": "use access token"})
+			}
 			userID = strings.TrimSpace(claims.UserID)
 			if userID == "" {
 				userID = strings.TrimSpace(claims.RegisteredClaims.Subject)
