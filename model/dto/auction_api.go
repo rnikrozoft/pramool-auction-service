@@ -12,6 +12,7 @@ type AuctionListItem struct {
 	BidderCount   int64  `json:"bidder_count"`
 	EndAt         string `json:"end_at"`
 	CoverImageURL string `json:"cover_image_url"`
+	BuyNowPrice   int64  `json:"buy_now_price"`
 }
 
 // AuctionListResponse is the JSON body for GET /auctions.
@@ -46,6 +47,8 @@ type AuctionDetailResponse struct {
 	PendingSellerPayout     bool   `json:"pending_seller_payout"`
 	EscrowAutoConfirmDays   int    `json:"escrow_auto_confirm_days,omitempty"`
 	EscrowAutoConfirmAt     string `json:"escrow_auto_confirm_at,omitempty"`
+	/** 0 = not set; bid >= this closes auction immediately. */
+	BuyNowPrice int64 `json:"buy_now_price"`
 }
 
 type PlaceBidResult struct {
@@ -54,6 +57,7 @@ type PlaceBidResult struct {
 	CurrentBid      int64  `json:"current_bid"`
 	TotalBids       int64  `json:"total_bids"`
 	RemainingCredit int64  `json:"remaining_credit"`
+	AuctionClosed   bool   `json:"auction_closed"`
 }
 
 type CloseEarlyRequest struct {

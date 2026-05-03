@@ -18,6 +18,7 @@ type PublicAuctionRow struct {
 	TotalBids     int64     `bun:"total_bids"`
 	EndAt         time.Time `bun:"end_at"`
 	CoverImageURL string    `bun:"cover_image_url"`
+	BuyNowPrice   int64     `bun:"buy_now_price"`
 	CreatedAt     time.Time `bun:"created_at"`
 	BidderCount   int64     `bun:"bidder_count"`
 }
@@ -105,6 +106,7 @@ SELECT
 	a.total_bids,
 	a.end_at,
 	a.cover_image_url,
+	COALESCE(a.buy_now_price, 0)::bigint AS buy_now_price,
 	a.created_at,
 	COALESCE(bid_stats.cnt, 0)::bigint AS bidder_count
 %s
@@ -127,7 +129,8 @@ func buildPublicAuctionWhere(f PublicAuctionFilter) (string, []interface{}) {
 	parts = append(parts, "a.end_at > NOW()")
 
 	if cat := strings.TrimSpace(f.Category); cat != "" && cat != "ทั้งหมด" {
-		parts = append(parts, "a.category = ?")
+		// หมวดหมู่เก็บเป็น "tag1|tag2|..." — ให้ตรงกับแท็กใดแท็กหนึ่ง
+		parts = append(parts, "? = ANY(string_to_array(a.category, '|'))")
 		args = append(args, cat)
 	}
 

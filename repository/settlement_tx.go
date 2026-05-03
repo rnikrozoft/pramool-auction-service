@@ -16,6 +16,7 @@ func (r auctionRepo) LockAuctionRowForUpdate(ctx context.Context, tx bun.Tx, auc
 			start_price, bid_step, current_bid, total_bids, status, end_at,
 			COALESCE(allow_early_close, FALSE),
 			COALESCE(early_close_hold_amount, 0),
+			COALESCE(buy_now_price, 0),
 			cover_image_url,
 			COALESCE(winner_id, ''),
 			seller_shipped_at, buyer_received_at, seller_payout_at,
@@ -28,6 +29,7 @@ func (r auctionRepo) LockAuctionRowForUpdate(ctx context.Context, tx bun.Tx, auc
 		&item.AuctionID, &item.SellerID, &item.Title, &item.Category, &item.Condition,
 		&item.Description, &item.StartPrice, &item.BidStep, &item.CurrentBid, &item.TotalBids,
 		&item.Status, &item.EndAt, &item.AllowEarlyClose, &item.EarlyCloseHoldAmount,
+		&item.BuyNowPrice,
 		&item.CoverImageURL, &item.WinnerID, &item.SellerShippedAt, &item.BuyerReceivedAt, &item.SellerPayoutAt,
 		&item.PayoutEarlyClose, &item.CreatedAt, &item.UpdatedAt,
 	)

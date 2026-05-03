@@ -33,7 +33,8 @@ func main() {
 	defer db.Close()
 
 	app := fiber.New(fiber.Config{
-		AppName: "pramool-auction-service",
+		AppName:   "pramool-auction-service",
+		BodyLimit: 32 * 1024 * 1024,
 	})
 	corsOrigins := strings.TrimSpace(os.Getenv("CORS_ALLOW_ORIGINS"))
 	if corsOrigins == "" {
@@ -47,6 +48,7 @@ func main() {
 	}))
 
 	auctionRepo := repository.NewAuctionRepository(db)
+	userCreditRepo := repository.NewUserCreditRepository(db)
 	walletBaseURL := strings.TrimSpace(os.Getenv("WALLET_API_BASE_URL"))
 	if walletBaseURL == "" {
 		walletBaseURL = "http://localhost:3102"
@@ -54,6 +56,7 @@ func main() {
 	hub := service.NewAuctionHub()
 	auctionSvc := service.NewAuctionService(
 		auctionRepo,
+		userCreditRepo,
 		walletBaseURL,
 		strings.TrimSpace(os.Getenv("WALLET_INTERNAL_KEY")),
 		hub,
@@ -63,6 +66,8 @@ func main() {
 	rt := handler.NewRealtimeHandler(hub, auctionSvc)
 	m := middleware.Middleware{JWTSecret: jwtSecret}
 
+	app.Static("/uploads", "./uploads")
+
 	app.Get("/auctions", auctionHandler.ListAuctions)
 	app.Get("/auctions/:id", auctionHandler.AuctionDetail)
 	app.Get("/my/active-bids", m.JWTMiddleware, auctionHandler.MyActiveBids)
@@ -70,6 +75,11 @@ func main() {
 	app.Post("/auctions/:id/mark-shipped", m.JWTMiddleware, auctionHandler.MarkSellerShipped)
 	app.Post("/auctions/:id/confirm-received", m.JWTMiddleware, auctionHandler.ConfirmBuyerReceived)
 	app.Post("/auctions/:id/close-early", m.JWTMiddleware, auctionHandler.CloseEarly)
+
+	app.Post("/seller/auctions", m.JWTMiddleware, auctionHandler.CreateSellerAuction)
+	app.Get("/seller/auctions", m.JWTMiddleware, auctionHandler.ListSellerAuctions)
+	app.Post("/seller/auctions/:id/reopen", m.JWTMiddleware, auctionHandler.ReopenSellerAuction)
+	app.Delete("/seller/auctions/:id", m.JWTMiddleware, auctionHandler.DeleteSellerAuction)
 
 	app.Get("/ws/auctions/:id", m.JWTMiddleware, func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {

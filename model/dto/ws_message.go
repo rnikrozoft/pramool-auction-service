@@ -9,6 +9,7 @@ type AuctionWSMessage struct {
 	CurrentBid      int64  `json:"current_bid,omitempty"`
 	TotalBids       int64  `json:"total_bids,omitempty"`
 	RemainingCredit int64  `json:"remaining_credit,omitempty"`
+	AuctionClosed   bool   `json:"auction_closed,omitempty"`
 	Message         string `json:"message,omitempty"`
 	// auction_state — listing fields (pointers so we omit on bid_ack / bid_update).
 	Status          string `json:"status,omitempty"`

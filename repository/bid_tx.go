@@ -35,11 +35,12 @@ func (r auctionRepo) UpdateAuctionOnBid(ctx context.Context, tx bun.Tx, auctionI
 		  AND end_at > NOW()
 		  AND ? >= current_bid + bid_step
 		RETURNING auction_id, seller_id, title, category, item_condition, description,
-		          start_price, current_bid, bid_step, total_bids, status, end_at, cover_image_url
+		          start_price, current_bid, bid_step, total_bids, status, end_at,
+		          COALESCE(buy_now_price, 0), cover_image_url
 	`, amount, auctionID, bidderID, amount).Scan(
 		&item.AuctionID, &item.SellerID, &item.Title, &item.Category, &item.Condition,
 		&item.Description, &item.StartPrice, &item.CurrentBid, &item.BidStep, &item.TotalBids,
-		&item.Status, &item.EndAt, &item.CoverImageURL,
+		&item.Status, &item.EndAt, &item.BuyNowPrice, &item.CoverImageURL,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrBidConflict

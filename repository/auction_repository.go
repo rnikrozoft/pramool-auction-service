@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/rnikrozoft/pramool-auction-service/model/entity"
 	"github.com/uptrace/bun"
@@ -50,6 +51,18 @@ type AuctionRepository interface {
 
 	// ListMyBidHistory returns auctions the user has placed at least one bid on (excludes own listings).
 	ListMyBidHistory(ctx context.Context, userID string, limit, offset int) ([]MyBidHistoryRow, error)
+
+	// Seller listing (migrated from pramool-core).
+	CreateAuctionWithTx(ctx context.Context, tx bun.Tx, auction entity.Auction) error
+	CreateAuctionImagesWithTx(ctx context.Context, tx bun.Tx, images []entity.AuctionImage) error
+	ListAuctionsBySellerID(ctx context.Context, sellerID string) ([]entity.Auction, error)
+	InsertListingDepositHoldTx(ctx context.Context, tx bun.Tx, sellerID, auctionID string, holdAmount, balanceBefore, balanceAfter int64, note string) error
+	LockAuctionBySellerForUpdate(ctx context.Context, tx bun.Tx, auctionID, sellerID string) (*entity.Auction, error)
+	CountAuctionBidsTx(ctx context.Context, tx bun.Tx, auctionID string) (int64, error)
+	CountHeldBidHoldsTx(ctx context.Context, tx bun.Tx, auctionID string) (int64, error)
+	ApplyAuctionReopenTx(ctx context.Context, tx bun.Tx, auctionID, sellerID string, endAt time.Time) (int64, error)
+	// DeleteClosedAuctionNoBidsTx removes a settled closed listing with no bids and no winner (DB cascades children).
+	DeleteClosedAuctionNoBidsTx(ctx context.Context, tx bun.Tx, auctionID, sellerID string) (int64, error)
 }
 
 type auctionRepo struct {
@@ -71,6 +84,7 @@ func (r auctionRepo) GetAuctionByID(ctx context.Context, auctionID string) (*ent
 		start_price, bid_step, current_bid, total_bids, status, end_at,
 		COALESCE(allow_early_close, FALSE) AS allow_early_close,
 		COALESCE(early_close_hold_amount, 0) AS early_close_hold_amount,
+		COALESCE(buy_now_price, 0) AS buy_now_price,
 		cover_image_url,
 		COALESCE(winner_id, '') AS winner_id,
 		seller_shipped_at, buyer_received_at, seller_payout_at,

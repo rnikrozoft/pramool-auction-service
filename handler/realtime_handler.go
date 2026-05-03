@@ -81,6 +81,7 @@ func (h *RealtimeHandler) AuctionWS(conn *websocket.Conn) {
 			Type:            "bid_ack",
 			AuctionID:       auctionID,
 			RemainingCredit: out.RemainingCredit,
+			AuctionClosed:   out.AuctionClosed,
 		})
 	}
 }

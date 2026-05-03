@@ -17,14 +17,16 @@ type Auction struct {
 	EndAt                time.Time `db:"end_at"`
 	AllowEarlyClose      bool      `db:"allow_early_close"`
 	EarlyCloseHoldAmount int64     `db:"early_close_hold_amount"`
-	CoverImageURL        string     `db:"cover_image_url"`
-	WinnerID             string     `db:"winner_id"`
-	SellerShippedAt      *time.Time `db:"seller_shipped_at"`
-	BuyerReceivedAt      *time.Time `db:"buyer_received_at"`
-	SellerPayoutAt       *time.Time `db:"seller_payout_at"`
-	PayoutEarlyClose     bool       `db:"payout_early_close"`
-	CreatedAt            time.Time  `db:"created_at"`
-	UpdatedAt            time.Time  `db:"updated_at"`
+	/** 0 = disabled; when a bid amount reaches this, auction closes immediately. */
+	BuyNowPrice      int64      `db:"buy_now_price"`
+	CoverImageURL    string     `db:"cover_image_url"`
+	WinnerID         string     `db:"winner_id"`
+	SellerShippedAt  *time.Time `db:"seller_shipped_at"`
+	BuyerReceivedAt  *time.Time `db:"buyer_received_at"`
+	SellerPayoutAt   *time.Time `db:"seller_payout_at"`
+	PayoutEarlyClose bool       `db:"payout_early_close"`
+	CreatedAt        time.Time  `db:"created_at"`
+	UpdatedAt        time.Time  `db:"updated_at"`
 }
 
 type AuctionImage struct {
