@@ -40,10 +40,11 @@ func (h *RealtimeHandler) AuctionWS(conn *websocket.Conn) {
 	ctx := context.Background()
 	if detail, err := h.svc.GetAuctionDetail(ctx, auctionID); err == nil {
 		_ = client.Send(dto.AuctionWSMessage{
-			Type:       "snapshot",
-			AuctionID:  auctionID,
-			CurrentBid: detail.CurrentBid,
-			TotalBids:  detail.TotalBids,
+			Type:                 "snapshot",
+			AuctionID:            auctionID,
+			CurrentBid:           detail.CurrentBid,
+			TotalBids:            detail.TotalBids,
+			BiddingPausedUntil:   detail.BiddingPausedUntil,
 		})
 	}
 

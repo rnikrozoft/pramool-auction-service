@@ -22,6 +22,8 @@ type AuctionRepository interface {
 	LockAuctionRowForUpdate(ctx context.Context, tx bun.Tx, auctionID string) (*entity.Auction, error)
 	// SealAuctionBiddingEndNow sets end_at to now while status stays active — used when seller starts early close so no new bids match end_at > NOW().
 	SealAuctionBiddingEndNow(ctx context.Context, tx bun.Tx, auctionID string) error
+	SetSellerClosePauseBidsUntil(ctx context.Context, tx bun.Tx, auctionID string, until time.Time) error
+	ClearSellerClosePauseBidsUntil(ctx context.Context, tx bun.Tx, auctionID string) error
 	SelectWinningBidHold(ctx context.Context, tx bun.Tx, auctionID string) (userID string, heldAmount int64, err error)
 	CloseAuctionNoWinner(ctx context.Context, tx bun.Tx, auctionID string) error
 	SelectLosingBidHolds(ctx context.Context, tx bun.Tx, auctionID, winnerUserID string) ([]LosingBidHold, error)
@@ -55,7 +57,10 @@ type AuctionRepository interface {
 	// Seller listing (migrated from pramool-core).
 	CreateAuctionWithTx(ctx context.Context, tx bun.Tx, auction entity.Auction) error
 	CreateAuctionImagesWithTx(ctx context.Context, tx bun.Tx, images []entity.AuctionImage) error
-	ListAuctionsBySellerID(ctx context.Context, sellerID string) ([]entity.Auction, error)
+	ListAuctionsBySellerID(ctx context.Context, sellerID, scope string, limit, offset int) ([]entity.Auction, error)
+	CountAuctionsBySellerID(ctx context.Context, sellerID string) (int, error)
+	CountSellerAuctionsDisplayActive(ctx context.Context, sellerID string) (int, error)
+	CountAuctionsBySellerIDScoped(ctx context.Context, sellerID, scope string) (int, error)
 	InsertListingDepositHoldTx(ctx context.Context, tx bun.Tx, sellerID, auctionID string, holdAmount, balanceBefore, balanceAfter int64, note string) error
 	LockAuctionBySellerForUpdate(ctx context.Context, tx bun.Tx, auctionID, sellerID string) (*entity.Auction, error)
 	CountAuctionBidsTx(ctx context.Context, tx bun.Tx, auctionID string) (int64, error)
@@ -89,6 +94,7 @@ func (r auctionRepo) GetAuctionByID(ctx context.Context, auctionID string) (*ent
 		COALESCE(winner_id, '') AS winner_id,
 		seller_shipped_at, buyer_received_at, seller_payout_at,
 		COALESCE(payout_early_close, FALSE) AS payout_early_close,
+		seller_close_pause_bids_until,
 		created_at, updated_at
 	FROM auctions
 	WHERE auction_id = ?

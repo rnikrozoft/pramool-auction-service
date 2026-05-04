@@ -112,11 +112,28 @@ func (h *AuctionHandler) ListSellerAuctions(c *fiber.Ctx) error {
 		return responseInternalError(c, errors.New("cannot claims user information"))
 	}
 
-	items, err := h.svc.ListSellerAuctions(c.Context(), sellerID)
+	limit := 10
+	if v := strings.TrimSpace(c.Query("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	offset := 0
+	if v := strings.TrimSpace(c.Query("offset")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	scope := strings.TrimSpace(c.Query("scope"))
+	if scope == "" {
+		scope = "all"
+	}
+
+	result, err := h.svc.ListSellerAuctions(c.Context(), sellerID, scope, limit, offset)
 	if err != nil {
 		return responseInternalError(c, err)
 	}
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{"items": items})
+	return c.Status(fiber.StatusOK).JSON(result)
 }
 
 func (h *AuctionHandler) ReopenSellerAuction(c *fiber.Ctx) error {

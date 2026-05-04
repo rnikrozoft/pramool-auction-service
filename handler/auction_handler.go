@@ -179,5 +179,5 @@ func (h *AuctionHandler) CloseEarly(c *fiber.Ctx) error {
 	if err := h.svc.CloseAuctionEarly(c.Context(), auctionID, sellerID); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{"message": "auction closed early"})
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{"message": "accepted"})
 }

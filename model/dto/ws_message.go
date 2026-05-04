@@ -16,4 +16,6 @@ type AuctionWSMessage struct {
 	EndAt           string `json:"end_at,omitempty"`
 	ReopenEligible  *bool  `json:"reopen_eligible,omitempty"`
 	AllowEarlyClose *bool  `json:"allow_early_close,omitempty"`
+	/** RFC3339 — ถ้ามี ฝั่ง client ห้ามส่งบิดจนกว่าจะหมดเวลาหรือได้ auction_state ใหม่ */
+	BiddingPausedUntil string `json:"bidding_paused_until,omitempty"`
 }
