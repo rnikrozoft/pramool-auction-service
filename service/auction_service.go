@@ -26,6 +26,8 @@ var (
 	ErrNotAuctionWinner      = errors.New("not auction winner")
 	ErrSellerMustShipFirst   = errors.New("seller must mark shipped first")
 	ErrMarkShippedNotAllowed = errors.New("cannot mark shipped for this auction")
+	// ErrSellerClosingAuction — ผู้ขายเริ่มปิดก่อนเวลา ช่วงหน่วงไม่รับบิด
+	ErrSellerClosingAuction = errors.New("bidding paused: seller is closing this auction")
 	// ErrAuctionReopenNotAllowed is returned when reopen preconditions are not met.
 	ErrAuctionReopenNotAllowed = errors.New("auction cannot be reopened: must be closed with no bids")
 	// ErrAuctionDeleteNotAllowed is returned when delete preconditions are not met (same eligibility as reopen).
@@ -34,6 +36,9 @@ var (
 
 const earlyCloseSellerKeepPercent int64 = 70
 const normalCloseSellerKeepPercent int64 = 75
+
+// sellerEarlyClosePauseDuration หลังผู้ขายกดปิดก่อนเวลา — ไม่รับบิดแล้วค่อย settle
+const sellerEarlyClosePauseDuration = 3 * time.Second
 
 const (
 	maxSellerCategories = 5
@@ -94,7 +99,7 @@ type AuctionService interface {
 	ConfirmBuyerReceived(ctx context.Context, auctionID, buyerUserID string) error
 
 	CreateSellerAuction(ctx context.Context, sellerID string, req dto.CreateAuctionRequest, imagePaths []string) (*dto.CreateAuctionResponse, error)
-	ListSellerAuctions(ctx context.Context, sellerID string) ([]dto.SellerAuctionItem, error)
+	ListSellerAuctions(ctx context.Context, sellerID, scope string, limit, offset int) (*dto.SellerAuctionListResponse, error)
 	ReopenSellerAuctionNoBids(ctx context.Context, sellerID, auctionID, endAtRFC3339 string) error
 	DeleteSellerAuctionClosedNoBids(ctx context.Context, sellerID, auctionID string) error
 }
@@ -144,17 +149,18 @@ func (s auctionSvc) ListPublicAuctions(ctx context.Context, filter repository.Pu
 	items := make([]dto.AuctionListItem, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, dto.AuctionListItem{
-			AuctionID:     row.AuctionID,
-			Title:         row.Title,
-			Category:      row.Category,
-			StartPrice:    row.StartPrice,
-			CurrentBid:    row.CurrentBid,
-			BidStep:       row.BidStep,
-			TotalBids:     row.TotalBids,
-			BidderCount:   row.BidderCount,
-			EndAt:         row.EndAt.Format(time.RFC3339),
-			CoverImageURL: row.CoverImageURL,
-			BuyNowPrice:   row.BuyNowPrice,
+			AuctionID:       row.AuctionID,
+			Title:           row.Title,
+			Category:        row.Category,
+			StartPrice:      row.StartPrice,
+			CurrentBid:      row.CurrentBid,
+			BidStep:         row.BidStep,
+			TotalBids:       row.TotalBids,
+			BidderCount:     row.BidderCount,
+			EndAt:           row.EndAt.Format(time.RFC3339),
+			CoverImageURL:   row.CoverImageURL,
+			BuyNowPrice:     row.BuyNowPrice,
+			AllowEarlyClose: row.AllowEarlyClose,
 		})
 	}
 	limit := filter.Limit
@@ -180,6 +186,9 @@ func (s auctionSvc) GetAuctionDetail(ctx context.Context, auctionID string) (*dt
 		return nil, err
 	}
 	if err := s.autoConfirmEscrowIfDue(ctx, auctionID); err != nil {
+		return nil, err
+	}
+	if err := s.tryFinishSellerPauseCloseIfDue(ctx, auctionID); err != nil {
 		return nil, err
 	}
 
@@ -226,6 +235,7 @@ func (s auctionSvc) GetAuctionDetail(ctx context.Context, auctionID string) (*dt
 		AllowEarlyClose:     item.AllowEarlyClose,
 		ReopenEligible:      reopenEligible,
 		BuyNowPrice:         item.BuyNowPrice,
+		BiddingPausedUntil:  formatTimePtr(item.SellerClosePauseBidsUntil),
 		CoverImageURL:       item.CoverImageURL,
 		Images:              imageURLs,
 		SellerShippedAt:     formatTimePtr(item.SellerShippedAt),
@@ -282,14 +292,15 @@ func (s auctionSvc) broadcastAuctionState(auctionID string) {
 	re := detail.ReopenEligible
 	ac := detail.AllowEarlyClose
 	s.hub.Broadcast(auctionID, dto.AuctionWSMessage{
-		Type:            "auction_state",
-		AuctionID:       auctionID,
-		Status:          detail.Status,
-		EndAt:           detail.EndAt,
-		CurrentBid:      detail.CurrentBid,
-		TotalBids:       detail.TotalBids,
-		ReopenEligible:  &re,
-		AllowEarlyClose: &ac,
+		Type:                 "auction_state",
+		AuctionID:            auctionID,
+		Status:               detail.Status,
+		EndAt:                detail.EndAt,
+		CurrentBid:           detail.CurrentBid,
+		TotalBids:            detail.TotalBids,
+		ReopenEligible:       &re,
+		AllowEarlyClose:      &ac,
+		BiddingPausedUntil:   detail.BiddingPausedUntil,
 	})
 }
 
@@ -407,7 +418,60 @@ func (s auctionSvc) CloseAuctionEarly(ctx context.Context, auctionID, sellerID s
 	if lock.Status != "active" || lock.SellerID != strings.TrimSpace(sellerID) || !lock.AllowEarlyClose {
 		return ErrCannotCloseEarly
 	}
-	// Stop accepting bids immediately (end_at in the past); settlement continues in this transaction.
+	now := time.Now()
+	if lock.SellerClosePauseBidsUntil != nil {
+		if now.Before(*lock.SellerClosePauseBidsUntil) {
+			return tx.Commit()
+		}
+		if err := tx.Rollback(); err != nil {
+			return err
+		}
+		return s.tryFinishSellerPauseCloseIfDue(ctx, auctionID)
+	}
+
+	pauseUntil := now.Add(sellerEarlyClosePauseDuration)
+	if err := s.repo.SetSellerClosePauseBidsUntil(ctx, tx, auctionID, pauseUntil); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.broadcastAuctionState(auctionID)
+	aid := auctionID
+	d := sellerEarlyClosePauseDuration
+	go func() {
+		time.Sleep(d)
+		bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_ = s.tryFinishSellerPauseCloseIfDue(bgCtx, aid)
+	}()
+	return nil
+}
+
+func (s auctionSvc) tryFinishSellerPauseCloseIfDue(ctx context.Context, auctionID string) error {
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	lock, err := s.repo.LockAuctionForSettlement(ctx, tx, auctionID)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if lock.Status != "active" {
+		return tx.Commit()
+	}
+	if lock.SellerClosePauseBidsUntil == nil {
+		return tx.Commit()
+	}
+	if now.Before(*lock.SellerClosePauseBidsUntil) {
+		return tx.Commit()
+	}
+	if err := s.repo.ClearSellerClosePauseBidsUntil(ctx, tx, auctionID); err != nil {
+		return err
+	}
 	if err := s.repo.SealAuctionBiddingEndNow(ctx, tx, auctionID); err != nil {
 		return err
 	}
@@ -425,6 +489,9 @@ func (s auctionSvc) CloseAuctionEarly(ctx context.Context, auctionID, sellerID s
 
 func (s auctionSvc) PlaceBid(ctx context.Context, auctionID, bidderSubject string, amount int64) (*dto.PlaceBidResult, error) {
 	if err := s.settleAuctionIfEnded(ctx, auctionID); err != nil {
+		return nil, err
+	}
+	if err := s.tryFinishSellerPauseCloseIfDue(ctx, auctionID); err != nil {
 		return nil, err
 	}
 	bidder, err := s.repo.FindBidderBySubject(ctx, strings.TrimSpace(bidderSubject))
@@ -450,6 +517,9 @@ func (s auctionSvc) PlaceBid(ctx context.Context, auctionID, bidderSubject strin
 	}
 	if a.Status != "active" || !a.EndAt.After(now) {
 		return nil, ErrAuctionClosed
+	}
+	if a.SellerClosePauseBidsUntil != nil && now.Before(*a.SellerClosePauseBidsUntil) {
+		return nil, ErrSellerClosingAuction
 	}
 	if amount < a.CurrentBid+a.BidStep {
 		return nil, ErrBidAmountTooLow
@@ -542,17 +612,29 @@ func (s auctionSvc) MyActiveBids(ctx context.Context, userID string) (*dto.MyAct
 	items := make([]dto.MyActiveBidItem, 0, len(rows))
 	for _, row := range rows {
 		nextMin := row.CurrentBid + row.BidStep
+		isLeading := strings.TrimSpace(row.LeadingUserID) == uid
+		if row.CanConfirmReceived {
+			isLeading = true
+		}
+		pauseUntil := ""
+		if row.SellerClosePauseBidsUntil != nil {
+			pauseUntil = row.SellerClosePauseBidsUntil.Format(time.RFC3339)
+		}
 		items = append(items, dto.MyActiveBidItem{
-			AuctionID:      row.AuctionID,
-			Title:          row.Title,
-			Category:       row.Category,
-			CoverImageURL:  row.CoverImageURL,
-			CurrentBid:     row.CurrentBid,
-			BidStep:        row.BidStep,
-			MyHeldAmount:   row.MyHeldAmount,
-			NextMinimumBid: nextMin,
-			IsLeading:      strings.TrimSpace(row.LeadingUserID) == uid,
-			EndAt:          row.EndAt.Format(time.RFC3339),
+			AuctionID:          row.AuctionID,
+			Title:              row.Title,
+			Category:           row.Category,
+			CoverImageURL:      row.CoverImageURL,
+			StartPrice:         row.StartPrice,
+			CurrentBid:         row.CurrentBid,
+			BidStep:            row.BidStep,
+			MyHeldAmount:       row.MyHeldAmount,
+			NextMinimumBid:     nextMin,
+			IsLeading:          isLeading,
+			EndAt:              row.EndAt.Format(time.RFC3339),
+			AllowEarlyClose:    row.AllowEarlyClose,
+			CanConfirmReceived: row.CanConfirmReceived,
+			BiddingPausedUntil: pauseUntil,
 		})
 	}
 	return &dto.MyActiveBidsResponse{Items: items}, nil
@@ -856,27 +938,84 @@ func (s auctionSvc) CreateSellerAuction(ctx context.Context, sellerID string, re
 	return &dto.CreateAuctionResponse{AuctionID: auctionID}, nil
 }
 
-func (s auctionSvc) ListSellerAuctions(ctx context.Context, sellerID string) ([]dto.SellerAuctionItem, error) {
-	items, err := s.repo.ListAuctionsBySellerID(ctx, sellerID)
+func normalizeSellerListScope(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "active", "closed":
+		return strings.ToLower(strings.TrimSpace(s))
+	default:
+		return "all"
+	}
+}
+
+func (s auctionSvc) ListSellerAuctions(ctx context.Context, sellerID, scope string, limit, offset int) (*dto.SellerAuctionListResponse, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	scope = normalizeSellerListScope(scope)
+	allCount, err := s.repo.CountAuctionsBySellerID(ctx, sellerID)
+	if err != nil {
+		return nil, err
+	}
+	activeCount, err := s.repo.CountSellerAuctionsDisplayActive(ctx, sellerID)
+	if err != nil {
+		return nil, err
+	}
+	scopedTotal, err := s.repo.CountAuctionsBySellerIDScoped(ctx, sellerID, scope)
+	if err != nil {
+		return nil, err
+	}
+	items, err := s.repo.ListAuctionsBySellerID(ctx, sellerID, scope, limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]dto.SellerAuctionItem, 0, len(items))
 	for _, item := range items {
+		reopenEligible := strings.EqualFold(strings.TrimSpace(item.Status), "closed") &&
+			item.TotalBids == 0 && strings.TrimSpace(item.WinnerID) == ""
+		pendingSellerPayout := strings.EqualFold(strings.TrimSpace(item.Status), "closed") &&
+			strings.TrimSpace(item.WinnerID) != "" && item.SellerPayoutAt == nil
+		shippedAt := ""
+		if item.SellerShippedAt != nil {
+			shippedAt = item.SellerShippedAt.Format(time.RFC3339)
+		}
+		biddingPause := ""
+		if item.SellerClosePauseBidsUntil != nil {
+			biddingPause = item.SellerClosePauseBidsUntil.Format(time.RFC3339)
+		}
 		out = append(out, dto.SellerAuctionItem{
-			AuctionID:     item.AuctionID,
-			Title:         item.Title,
-			Category:      item.Category,
-			Status:        item.Status,
-			StartPrice:    item.StartPrice,
-			CurrentBid:    item.CurrentBid,
-			TotalBids:     item.TotalBids,
-			EndAt:         item.EndAt.Format(time.RFC3339),
-			CoverImageURL: item.CoverImageURL,
-			BuyNowPrice:   item.BuyNowPrice,
+			AuctionID:           item.AuctionID,
+			Title:               item.Title,
+			Category:            item.Category,
+			Status:              item.Status,
+			StartPrice:          item.StartPrice,
+			BidStep:             item.BidStep,
+			CurrentBid:          item.CurrentBid,
+			TotalBids:           item.TotalBids,
+			EndAt:               item.EndAt.Format(time.RFC3339),
+			CoverImageURL:       item.CoverImageURL,
+			BuyNowPrice:         item.BuyNowPrice,
+			AllowEarlyClose:     item.AllowEarlyClose,
+			ReopenEligible:      reopenEligible,
+			PendingSellerPayout: pendingSellerPayout,
+			SellerShippedAt:     shippedAt,
+			BiddingPausedUntil:  biddingPause,
 		})
 	}
-	return out, nil
+	return &dto.SellerAuctionListResponse{
+		Items:       out,
+		Total:       scopedTotal,
+		AllCount:    allCount,
+		ActiveCount: activeCount,
+		Limit:       limit,
+		Offset:      offset,
+		Scope:       scope,
+	}, nil
 }
 
 func (s auctionSvc) ReopenSellerAuctionNoBids(ctx context.Context, sellerID, auctionID, endAtRFC3339 string) error {

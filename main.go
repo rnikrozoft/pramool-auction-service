@@ -64,9 +64,12 @@ func main() {
 	)
 	auctionHandler := handler.NewAuctionHandler(auctionSvc)
 	rt := handler.NewRealtimeHandler(hub, auctionSvc)
+	platformRev := handler.NewPlatformRevenueHandler(db, os.Getenv("AUCTION_INTERNAL_KEY"))
 	m := middleware.Middleware{JWTSecret: jwtSecret}
 
 	app.Static("/uploads", "./uploads")
+
+	app.Get("/internal/platform-fee-summary", platformRev.Summary)
 
 	app.Get("/auctions", auctionHandler.ListAuctions)
 	app.Get("/auctions/:id", auctionHandler.AuctionDetail)

@@ -11,8 +11,9 @@ type AuctionListItem struct {
 	TotalBids     int64  `json:"total_bids"`
 	BidderCount   int64  `json:"bidder_count"`
 	EndAt         string `json:"end_at"`
-	CoverImageURL string `json:"cover_image_url"`
-	BuyNowPrice   int64  `json:"buy_now_price"`
+	CoverImageURL   string `json:"cover_image_url"`
+	BuyNowPrice     int64  `json:"buy_now_price"`
+	AllowEarlyClose bool   `json:"allow_early_close"`
 }
 
 // AuctionListResponse is the JSON body for GET /auctions.
@@ -49,6 +50,8 @@ type AuctionDetailResponse struct {
 	EscrowAutoConfirmAt     string `json:"escrow_auto_confirm_at,omitempty"`
 	/** 0 = not set; bid >= this closes auction immediately. */
 	BuyNowPrice int64 `json:"buy_now_price"`
+	/** RFC3339 — ถ้ามีและเวลาปัจจุบันยังไม่ถึง ระบบไม่รับบิด (ผู้ขายกำลังปิดประมูล) */
+	BiddingPausedUntil string `json:"bidding_paused_until,omitempty"`
 }
 
 type PlaceBidResult struct {
@@ -66,16 +69,20 @@ type CloseEarlyRequest struct {
 
 // MyActiveBidItem is one row for GET /my/active-bids.
 type MyActiveBidItem struct {
-	AuctionID       string `json:"auction_id"`
-	Title           string `json:"title"`
-	Category        string `json:"category"`
-	CoverImageURL   string `json:"cover_image_url"`
-	CurrentBid      int64  `json:"current_bid"`
-	BidStep         int64  `json:"bid_step"`
-	MyHeldAmount    int64  `json:"my_held_amount"`
-	NextMinimumBid  int64  `json:"next_minimum_bid"`
-	IsLeading       bool   `json:"is_leading"`
-	EndAt           string `json:"end_at"`
+	AuctionID          string `json:"auction_id"`
+	Title              string `json:"title"`
+	Category           string `json:"category"`
+	CoverImageURL      string `json:"cover_image_url"`
+	StartPrice         int64  `json:"start_price"`
+	CurrentBid         int64  `json:"current_bid"`
+	BidStep            int64  `json:"bid_step"`
+	MyHeldAmount       int64  `json:"my_held_amount"`
+	NextMinimumBid     int64  `json:"next_minimum_bid"`
+	IsLeading          bool   `json:"is_leading"`
+	EndAt              string `json:"end_at"`
+	AllowEarlyClose    bool   `json:"allow_early_close"`
+	CanConfirmReceived bool   `json:"can_confirm_received"`
+	BiddingPausedUntil   string `json:"bidding_paused_until,omitempty"`
 }
 
 type MyActiveBidsResponse struct {

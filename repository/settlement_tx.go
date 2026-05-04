@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/rnikrozoft/pramool-auction-service/model/entity"
 	"github.com/uptrace/bun"
@@ -21,6 +22,7 @@ func (r auctionRepo) LockAuctionRowForUpdate(ctx context.Context, tx bun.Tx, auc
 			COALESCE(winner_id, ''),
 			seller_shipped_at, buyer_received_at, seller_payout_at,
 			COALESCE(payout_early_close, FALSE),
+			seller_close_pause_bids_until,
 			created_at, updated_at
 		FROM auctions
 		WHERE auction_id = ?
@@ -31,7 +33,7 @@ func (r auctionRepo) LockAuctionRowForUpdate(ctx context.Context, tx bun.Tx, auc
 		&item.Status, &item.EndAt, &item.AllowEarlyClose, &item.EarlyCloseHoldAmount,
 		&item.BuyNowPrice,
 		&item.CoverImageURL, &item.WinnerID, &item.SellerShippedAt, &item.BuyerReceivedAt, &item.SellerPayoutAt,
-		&item.PayoutEarlyClose, &item.CreatedAt, &item.UpdatedAt,
+		&item.PayoutEarlyClose, &item.SellerClosePauseBidsUntil, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -47,16 +49,33 @@ func (r auctionRepo) SealAuctionBiddingEndNow(ctx context.Context, tx bun.Tx, au
 	return err
 }
 
+func (r auctionRepo) SetSellerClosePauseBidsUntil(ctx context.Context, tx bun.Tx, auctionID string, until time.Time) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE auctions SET seller_close_pause_bids_until = ?, updated_at = NOW()
+		WHERE auction_id = ? AND status = 'active'
+	`, until, auctionID)
+	return err
+}
+
+func (r auctionRepo) ClearSellerClosePauseBidsUntil(ctx context.Context, tx bun.Tx, auctionID string) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE auctions SET seller_close_pause_bids_until = NULL, updated_at = NOW()
+		WHERE auction_id = ?
+	`, auctionID)
+	return err
+}
+
 func (r auctionRepo) LockAuctionForSettlement(ctx context.Context, tx bun.Tx, auctionID string) (AuctionSettlementLock, error) {
 	var row AuctionSettlementLock
 	err := tx.QueryRowContext(ctx, `
 		SELECT seller_id, status, end_at, current_bid, start_price,
 			COALESCE(allow_early_close, FALSE),
-			COALESCE(early_close_hold_amount, 0)
+			COALESCE(early_close_hold_amount, 0),
+			seller_close_pause_bids_until
 		FROM auctions
 		WHERE auction_id = ?
 		FOR UPDATE
-	`, auctionID).Scan(&row.SellerID, &row.Status, &row.EndAt, &row.CurrentBid, &row.StartPrice, &row.AllowEarlyClose, &row.EarlyCloseHoldAmount)
+	`, auctionID).Scan(&row.SellerID, &row.Status, &row.EndAt, &row.CurrentBid, &row.StartPrice, &row.AllowEarlyClose, &row.EarlyCloseHoldAmount, &row.SellerClosePauseBidsUntil)
 	return row, err
 }
 

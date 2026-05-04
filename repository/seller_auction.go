@@ -2,11 +2,23 @@ package repository
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/rnikrozoft/pramool-auction-service/model/entity"
 	"github.com/uptrace/bun"
 )
+
+func sellerAuctionScopeSQL(scope string) string {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "active":
+		return "AND status = 'active' AND end_at > NOW()"
+	case "closed":
+		return "AND NOT (status = 'active' AND end_at > NOW())"
+	default:
+		return ""
+	}
+}
 
 func (r auctionRepo) CreateAuctionWithTx(ctx context.Context, tx bun.Tx, auction entity.Auction) error {
 	query := `
@@ -59,19 +71,50 @@ func (r auctionRepo) CreateAuctionImagesWithTx(ctx context.Context, tx bun.Tx, i
 	return nil
 }
 
-func (r auctionRepo) ListAuctionsBySellerID(ctx context.Context, sellerID string) ([]entity.Auction, error) {
+func (r auctionRepo) ListAuctionsBySellerID(ctx context.Context, sellerID, scope string, limit, offset int) ([]entity.Auction, error) {
 	items := make([]entity.Auction, 0)
+	extra := sellerAuctionScopeSQL(scope)
 	query := `
 	SELECT auction_id, seller_id, title, category, item_condition AS condition, description,
 		start_price, bid_step, current_bid, total_bids, status, end_at, COALESCE(allow_early_close, FALSE) AS allow_early_close,
 		COALESCE(buy_now_price, 0) AS buy_now_price, cover_image_url,
+		COALESCE(NULLIF(TRIM(BOTH FROM COALESCE(winner_id::text, '')), ''), '') AS winner_id,
+		seller_shipped_at,
+		seller_payout_at,
+		seller_close_pause_bids_until,
 		created_at, updated_at
 	FROM auctions
 	WHERE seller_id = ?
-	ORDER BY created_at DESC
+	` + extra + `
+	ORDER BY created_at DESC, auction_id DESC
+	LIMIT ? OFFSET ?
 	`
-	err := r.bun.NewRaw(query, sellerID).Scan(ctx, &items)
+	err := r.bun.NewRaw(query, sellerID, limit, offset).Scan(ctx, &items)
 	return items, err
+}
+
+func (r auctionRepo) CountAuctionsBySellerID(ctx context.Context, sellerID string) (int, error) {
+	var n int
+	err := r.bun.NewRaw(`SELECT COUNT(*)::int FROM auctions WHERE seller_id = ?`, sellerID).Scan(ctx, &n)
+	return n, err
+}
+
+// CountSellerAuctionsDisplayActive matches the seller table UI: status active and end_at still in the future.
+func (r auctionRepo) CountSellerAuctionsDisplayActive(ctx context.Context, sellerID string) (int, error) {
+	var n int
+	err := r.bun.NewRaw(`
+		SELECT COUNT(*)::int FROM auctions
+		WHERE seller_id = ? AND status = 'active' AND end_at > NOW()
+	`, sellerID).Scan(ctx, &n)
+	return n, err
+}
+
+func (r auctionRepo) CountAuctionsBySellerIDScoped(ctx context.Context, sellerID, scope string) (int, error) {
+	extra := sellerAuctionScopeSQL(scope)
+	query := `SELECT COUNT(*)::int FROM auctions WHERE seller_id = ? ` + extra
+	var n int
+	err := r.bun.NewRaw(query, sellerID).Scan(ctx, &n)
+	return n, err
 }
 
 func (r auctionRepo) LockAuctionBySellerForUpdate(ctx context.Context, tx bun.Tx, auctionID, sellerID string) (*entity.Auction, error) {
@@ -130,6 +173,7 @@ func (r auctionRepo) ApplyAuctionReopenTx(ctx context.Context, tx bun.Tx, auctio
 			winner_id = NULL,
 			settled_at = NULL,
 			early_close_hold_amount = 0,
+			seller_close_pause_bids_until = NULL,
 			updated_at = NOW()
 		WHERE auction_id = ? AND seller_id = ?
 		  AND status = 'closed'

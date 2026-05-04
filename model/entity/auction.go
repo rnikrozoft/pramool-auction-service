@@ -25,8 +25,10 @@ type Auction struct {
 	BuyerReceivedAt  *time.Time `db:"buyer_received_at"`
 	SellerPayoutAt   *time.Time `db:"seller_payout_at"`
 	PayoutEarlyClose bool       `db:"payout_early_close"`
-	CreatedAt        time.Time  `db:"created_at"`
-	UpdatedAt        time.Time  `db:"updated_at"`
+	/** ถ้าไม่ nil และเวลาปัจจุบันยังก่อนค่านี้ — ไม่รับบิด (ผู้ขายเริ่มปิดก่อนเวลา) */
+	SellerClosePauseBidsUntil *time.Time `db:"seller_close_pause_bids_until"`
+	CreatedAt                  time.Time  `db:"created_at"`
+	UpdatedAt                  time.Time  `db:"updated_at"`
 }
 
 type AuctionImage struct {

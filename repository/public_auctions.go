@@ -9,18 +9,19 @@ import (
 
 // PublicAuctionRow is one row for GET /auctions (browse).
 type PublicAuctionRow struct {
-	AuctionID     string    `bun:"auction_id"`
-	Title         string    `bun:"title"`
-	Category      string    `bun:"category"`
-	StartPrice    int64     `bun:"start_price"`
-	CurrentBid    int64     `bun:"current_bid"`
-	BidStep       int64     `bun:"bid_step"`
-	TotalBids     int64     `bun:"total_bids"`
-	EndAt         time.Time `bun:"end_at"`
-	CoverImageURL string    `bun:"cover_image_url"`
-	BuyNowPrice   int64     `bun:"buy_now_price"`
-	CreatedAt     time.Time `bun:"created_at"`
-	BidderCount   int64     `bun:"bidder_count"`
+	AuctionID       string    `bun:"auction_id"`
+	Title           string    `bun:"title"`
+	Category        string    `bun:"category"`
+	StartPrice      int64     `bun:"start_price"`
+	CurrentBid      int64     `bun:"current_bid"`
+	BidStep         int64     `bun:"bid_step"`
+	TotalBids       int64     `bun:"total_bids"`
+	EndAt           time.Time `bun:"end_at"`
+	CoverImageURL   string    `bun:"cover_image_url"`
+	BuyNowPrice     int64     `bun:"buy_now_price"`
+	AllowEarlyClose bool      `bun:"allow_early_close"`
+	CreatedAt       time.Time `bun:"created_at"`
+	BidderCount     int64     `bun:"bidder_count"`
 }
 
 // PublicAuctionFilter drives ListPublicAuctions / CountPublicAuctions.
@@ -107,6 +108,7 @@ SELECT
 	a.end_at,
 	a.cover_image_url,
 	COALESCE(a.buy_now_price, 0)::bigint AS buy_now_price,
+	COALESCE(a.allow_early_close, FALSE) AS allow_early_close,
 	a.created_at,
 	COALESCE(bid_stats.cnt, 0)::bigint AS bidder_count
 %s
@@ -129,15 +131,38 @@ func buildPublicAuctionWhere(f PublicAuctionFilter) (string, []interface{}) {
 	parts = append(parts, "a.end_at > NOW()")
 
 	if cat := strings.TrimSpace(f.Category); cat != "" && cat != "ทั้งหมด" {
-		// หมวดหมู่เก็บเป็น "tag1|tag2|..." — ให้ตรงกับแท็กใดแท็กหนึ่ง
-		parts = append(parts, "? = ANY(string_to_array(a.category, '|'))")
-		args = append(args, cat)
+		// รองรับ multiselect จาก query "cat1,cat2,..." และให้ match อย่างน้อยหนึ่งแท็ก
+		cats := strings.Split(cat, ",")
+		conds := make([]string, 0, len(cats))
+		seen := map[string]bool{}
+		for _, raw := range cats {
+			c := strings.TrimSpace(raw)
+			if c == "" || c == "ทั้งหมด" || seen[c] {
+				continue
+			}
+			seen[c] = true
+			conds = append(conds, "? = ANY(string_to_array(a.category, '|'))")
+			args = append(args, c)
+		}
+		if len(conds) > 0 {
+			parts = append(parts, "("+strings.Join(conds, " OR ")+")")
+		}
 	}
 
 	if q := strings.TrimSpace(f.Query); q != "" {
-		pat := "%" + strings.ToLower(q) + "%"
-		parts = append(parts, "(LOWER(a.title) LIKE ? OR LOWER(a.auction_id) LIKE ?)")
-		args = append(args, pat, pat)
+		// Search by title only (partial match). Split words so users can type a subset.
+		// Example: "iphone 15" -> title must contain "iphone" AND "15" (in any position).
+		tokens := strings.Fields(strings.ToLower(q))
+		if len(tokens) == 0 {
+			tokens = []string{strings.ToLower(q)}
+		}
+		for _, tk := range tokens {
+			if tk == "" {
+				continue
+			}
+			parts = append(parts, "LOWER(a.title) LIKE ?")
+			args = append(args, "%"+tk+"%")
+		}
 	}
 
 	if f.MinPrice != nil && *f.MinPrice >= 0 {

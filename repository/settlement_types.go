@@ -4,13 +4,14 @@ import "time"
 
 // AuctionSettlementLock is a row from auctions FOR UPDATE during settlement.
 type AuctionSettlementLock struct {
-	SellerID             string
-	Status               string
-	EndAt                time.Time
-	CurrentBid           int64
-	StartPrice           int64
-	AllowEarlyClose      bool
-	EarlyCloseHoldAmount int64
+	SellerID                   string
+	Status                     string
+	EndAt                      time.Time
+	CurrentBid                 int64
+	StartPrice                 int64
+	AllowEarlyClose            bool
+	EarlyCloseHoldAmount      int64
+	SellerClosePauseBidsUntil *time.Time
 }
 
 // LosingBidHold is a non-winning held bid row during settlement.

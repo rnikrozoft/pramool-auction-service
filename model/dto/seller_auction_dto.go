@@ -17,15 +17,33 @@ type CreateAuctionResponse struct {
 	AuctionID string `json:"auction_id"`
 }
 
+// SellerAuctionListResponse is the JSON body for GET /seller/auctions (paginated).
+type SellerAuctionListResponse struct {
+	Items       []SellerAuctionItem `json:"items"`
+	Total       int                 `json:"total"`         // rows matching scope (for load more)
+	AllCount    int                 `json:"all_count"`     // total listings (tab "ทั้งหมด")
+	ActiveCount int                 `json:"active_count"`  // display-active (tab + summary card)
+	Limit       int                 `json:"limit"`
+	Offset      int                 `json:"offset"`
+	Scope       string              `json:"scope"` // all | active | closed
+}
+
 type SellerAuctionItem struct {
-	AuctionID     string `json:"auction_id"`
-	Title         string `json:"title"`
-	Category      string `json:"category"`
-	Status        string `json:"status"`
-	StartPrice    int64  `json:"start_price"`
-	CurrentBid    int64  `json:"current_bid"`
-	TotalBids     int64  `json:"total_bids"`
-	EndAt         string `json:"end_at"`
-	CoverImageURL string `json:"cover_image_url"`
-	BuyNowPrice   int64  `json:"buy_now_price"`
+	AuctionID           string `json:"auction_id"`
+	Title               string `json:"title"`
+	Category            string `json:"category"`
+	Status              string `json:"status"`
+	StartPrice          int64  `json:"start_price"`
+	BidStep             int64  `json:"bid_step"`
+	CurrentBid          int64  `json:"current_bid"`
+	TotalBids           int64  `json:"total_bids"`
+	EndAt               string `json:"end_at"`
+	CoverImageURL       string `json:"cover_image_url"`
+	BuyNowPrice         int64  `json:"buy_now_price"`
+	AllowEarlyClose     bool   `json:"allow_early_close"`
+	ReopenEligible      bool   `json:"reopen_eligible"`
+	PendingSellerPayout bool   `json:"pending_seller_payout"`
+	SellerShippedAt     string `json:"seller_shipped_at,omitempty"`
+	/** RFC3339 — ผู้ขายเริ่มปิดก่อนเวลา ยังไม่รับบิด */
+	BiddingPausedUntil string `json:"bidding_paused_until,omitempty"`
 }
