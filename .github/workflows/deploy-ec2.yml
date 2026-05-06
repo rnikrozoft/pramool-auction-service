@@ -63,13 +63,16 @@ jobs:
             sudo mkdir -p /opt/pramool/deploy
             sudo chown -R "$(whoami):$(whoami)" /opt/pramool
 
+      - name: Stage deploy script (flat path for scp-action)
+        run: cp deploy/ec2-deploy-compose.sh ec2-deploy-compose.sh
+
       - name: Upload deploy helper script
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          source: deploy/ec2-deploy-compose.sh
+          source: ec2-deploy-compose.sh
           target: /opt/pramool/deploy/
 
       - name: Deploy on EC2 (health check + rollback)
