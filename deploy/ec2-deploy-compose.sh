@@ -33,8 +33,8 @@ echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY_HOST}" -u "${REGISTRY_USE
 export REGISTRY_HOST
 export IMAGE_TAG="${NEW_TAG}"
 
-compose -f "${COMPOSE_FILE}" pull "${SERVICE}"
-compose -f "${COMPOSE_FILE}" up -d --no-deps "${SERVICE}"
+docker compose -f "${COMPOSE_FILE}" pull "${SERVICE}"
+docker compose -f "${COMPOSE_FILE}" up -d --no-deps "${SERVICE}"
 
 ok=0
 for _ in $(seq 1 30); do
@@ -50,8 +50,8 @@ if [[ "${ok}" != 1 ]]; then
   if [[ -n "${PREV}" && "${PREV}" != "${NEW_TAG}" ]]; then
     echo "Attempting rollback to last-good tag: ${PREV}" >&2
     export IMAGE_TAG="${PREV}"
-    compose -f "${COMPOSE_FILE}" pull "${SERVICE}"
-    compose -f "${COMPOSE_FILE}" up -d --no-deps "${SERVICE}"
+    docker compose -f "${COMPOSE_FILE}" pull "${SERVICE}"
+    docker compose -f "${COMPOSE_FILE}" up -d --no-deps "${SERVICE}"
     sleep 3
     if curl -sfS --max-time 5 "${HEALTH_URL}" >/dev/null; then
       echo "Rollback: service healthy again on ${PREV}" >&2
