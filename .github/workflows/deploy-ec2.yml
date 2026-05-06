@@ -1,0 +1,113 @@
+name: Build, push, deploy (EC2)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: pramool-auction
+  COMPOSE_SERVICE: pramool-auction-service
+  DEPLOY_PATH: /opt/pramool
+  DEPLOY_HEALTH_URL: http://127.0.0.1:3103/healthz
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy image tag (immutable rollback)
+        id: dep
+        run: echo "short=$(echo "${GITHUB_SHA}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Enable insecure registry on runner (HTTP private registry)
+        run: |
+          sudo mkdir -p /etc/docker
+          printf '%s\n' '{"insecure-registries":["${{ secrets.REGISTRY_HOST }}"]}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          sleep 3
+
+      - name: Log in to private registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY_HOST }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.REGISTRY_HOST }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Ensure deploy dir on EC2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: mkdir -p /opt/pramool/deploy
+
+      - name: Upload deploy helper script
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: deploy/ec2-deploy-compose.sh
+          target: /opt/pramool/deploy/
+
+      - name: Deploy on EC2 (health check + rollback)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
+            mkdir -p "$DEPLOY_PATH"
+            cd "$DEPLOY_PATH"
+            if [ -n "${{ secrets.PRAMOOL_DOTENV_B64 }}" ]; then
+              echo "${{ secrets.PRAMOOL_DOTENV_B64 }}" | base64 -d > .env
+            fi
+            chmod +x /opt/pramool/deploy/ec2-deploy-compose.sh
+            export REGISTRY_HOST="${{ secrets.REGISTRY_HOST }}"
+            export REGISTRY_USER="${{ secrets.REGISTRY_USER }}"
+            export REGISTRY_PASSWORD="${{ secrets.REGISTRY_PASSWORD }}"
+            /opt/pramool/deploy/ec2-deploy-compose.sh "${{ env.COMPOSE_SERVICE }}" "${{ env.DEPLOY_HEALTH_URL }}" "${{ steps.dep.outputs.short }}"
+
+      - name: Private registry garbage-collect (free unreferenced blobs)
+        if: success()
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set +e
+            CNT="${{ vars.REGISTRY_CONTAINER_NAME }}"
+            [ -z "$CNT" ] && CNT=registry
+            if ! docker ps --format '{{.Names}}' | grep -qx "$CNT"; then
+              echo "No container named $CNT — skip registry GC"
+              exit 0
+            fi
+            docker exec "$CNT" /bin/registry garbage-collect --delete-untagged /etc/docker/registry/config.yml \
+              || docker exec "$CNT" registry garbage-collect --delete-untagged /etc/docker/registry/config.yml \
+              || docker exec "$CNT" /bin/registry garbage-collect /etc/docker/registry/config.yml \
+              || docker exec "$CNT" registry garbage-collect /etc/docker/registry/config.yml
