@@ -7,19 +7,19 @@ import (
 
 // MyActiveBidRow is an active bid hold row and/or a closed auction where the buyer may confirm receipt.
 type MyActiveBidRow struct {
-	AuctionID            string
-	Title                string
-	Category             string
-	CoverImageURL        string
-	StartPrice           int64
-	CurrentBid           int64
-	BidStep              int64
-	EndAt                time.Time
-	MyHeldAmount         int64
-	LeadingUserID              string
-	AllowEarlyClose            bool
-	CanConfirmReceived         bool
-	SellerClosePauseBidsUntil  *time.Time
+	AuctionID                 string
+	Title                     string
+	Category                  string
+	CoverImageURL             string
+	StartPrice                int64
+	CurrentBid                int64
+	BidStep                   int64
+	EndAt                     time.Time
+	MyHeldAmount              int64
+	LeadingUserID             string
+	AllowEarlyClose           bool
+	CanConfirmReceived        bool
+	SellerClosePauseBidsUntil *time.Time
 }
 
 func (r auctionRepo) ListMyActiveBids(ctx context.Context, userID string) ([]MyActiveBidRow, error) {

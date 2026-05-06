@@ -1,25 +1,51 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
+	"github.com/gofiber/contrib/otelfiber"
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/joho/godotenv"
 	"github.com/rnikrozoft/pramool-auction-service/handler"
+	"github.com/rnikrozoft/pramool-auction-service/internal/telemetry"
 	"github.com/rnikrozoft/pramool-auction-service/middleware"
 	"github.com/rnikrozoft/pramool-auction-service/repository"
 	"github.com/rnikrozoft/pramool-auction-service/service"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
+	"go.uber.org/zap"
 )
 
 func main() {
+	_ = godotenv.Load()
+	logger, err := telemetry.NewZapLogger()
+	if err != nil {
+		panic(err)
+	}
+	defer logger.Sync()
+
+	shutdownTelemetry, err := telemetry.Init("pramool-auction-service")
+	if err != nil {
+		logger.Fatal("otel init", zap.Error(err))
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(ctx); err != nil {
+			logger.Warn("otel shutdown", zap.Error(err))
+		}
+	}()
+
 	jwtSecret := os.Getenv("JWT_SECRET")
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -28,7 +54,7 @@ func main() {
 
 	db, err := openDB()
 	if err != nil {
-		log.Fatalf("database: %v", err)
+		logger.Fatal("database", zap.Error(err))
 	}
 	defer db.Close()
 
@@ -36,6 +62,9 @@ func main() {
 		AppName:   "pramool-auction-service",
 		BodyLimit: 32 * 1024 * 1024,
 	})
+	app.Use(otelfiber.Middleware())
+	app.Use(telemetry.AccessLogWithZap(logger))
+	telemetry.MountHealth(app, "pramool-auction-service")
 	corsOrigins := strings.TrimSpace(os.Getenv("CORS_ALLOW_ORIGINS"))
 	if corsOrigins == "" {
 		corsOrigins = "http://localhost:3000"
@@ -49,27 +78,18 @@ func main() {
 
 	auctionRepo := repository.NewAuctionRepository(db)
 	userCreditRepo := repository.NewUserCreditRepository(db)
-	walletBaseURL := strings.TrimSpace(os.Getenv("WALLET_API_BASE_URL"))
-	if walletBaseURL == "" {
-		walletBaseURL = "http://localhost:3102"
-	}
 	hub := service.NewAuctionHub()
 	auctionSvc := service.NewAuctionService(
 		auctionRepo,
 		userCreditRepo,
-		walletBaseURL,
-		strings.TrimSpace(os.Getenv("WALLET_INTERNAL_KEY")),
 		hub,
 		strings.TrimSpace(os.Getenv("ESCROW_AUTO_CONFIRM_DAYS")),
 	)
 	auctionHandler := handler.NewAuctionHandler(auctionSvc)
 	rt := handler.NewRealtimeHandler(hub, auctionSvc)
-	platformRev := handler.NewPlatformRevenueHandler(db, os.Getenv("AUCTION_INTERNAL_KEY"))
 	m := middleware.Middleware{JWTSecret: jwtSecret}
 
 	app.Static("/uploads", "./uploads")
-
-	app.Get("/internal/platform-fee-summary", platformRev.Summary)
 
 	app.Get("/auctions", auctionHandler.ListAuctions)
 	app.Get("/auctions/:id", auctionHandler.AuctionDetail)
@@ -91,7 +111,22 @@ func main() {
 		return fiber.ErrUpgradeRequired
 	}, websocket.New(rt.AuctionWS))
 
-	log.Fatal(app.Listen(":" + port))
+	addr := ":" + port
+	go func() {
+		if err := app.Listen(addr); err != nil {
+			logger.Error("listen stopped", zap.Error(err))
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := app.ShutdownWithContext(shutdownCtx); err != nil {
+		logger.Error("fiber shutdown", zap.Error(err))
+	}
 }
 
 func openDB() (*bun.DB, error) {

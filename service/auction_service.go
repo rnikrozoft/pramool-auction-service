@@ -107,20 +107,16 @@ type AuctionService interface {
 type auctionSvc struct {
 	repo                  repository.AuctionRepository
 	userCredit            repository.UserCreditRepository
-	walletBaseURL         string
-	walletInternalKey     string
 	hub                   *AuctionHub
 	escrowAutoConfirmDays int
 }
 
 // NewAuctionService constructs the auction service. escrowAutoConfirmDaysEnv is the raw value of
 // ESCROW_AUTO_CONFIRM_DAYS: empty defaults to 14 calendar days after seller_shipped_at; "0" disables auto-release.
-func NewAuctionService(repo repository.AuctionRepository, userCredit repository.UserCreditRepository, walletBaseURL, walletInternalKey string, hub *AuctionHub, escrowAutoConfirmDaysEnv string) AuctionService {
+func NewAuctionService(repo repository.AuctionRepository, userCredit repository.UserCreditRepository, hub *AuctionHub, escrowAutoConfirmDaysEnv string) AuctionService {
 	return auctionSvc{
 		repo:                  repo,
 		userCredit:            userCredit,
-		walletBaseURL:         strings.TrimRight(strings.TrimSpace(walletBaseURL), "/"),
-		walletInternalKey:     strings.TrimSpace(walletInternalKey),
 		hub:                   hub,
 		escrowAutoConfirmDays: parseEscrowAutoConfirmDays(escrowAutoConfirmDaysEnv),
 	}
