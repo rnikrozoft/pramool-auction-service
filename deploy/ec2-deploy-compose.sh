@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Deploy one Compose service with a pinned image tag, health check, and rollback to last-known-good tag.
 # Pattern matches common VPS deploy scripts (immutable tag + curl health); not registry-GC logic.
+# Uses --no-deps: each repo pushes its own git SHA tag; compose depends_on would otherwise pull sibling
+# images with that same tag (e.g. auction deploy must not require pramool-wallet:<auction-sha>).
 #
 # Usage (on EC2, from repo root or /opt/pramool):
 #   export REGISTRY_HOST REGISTRY_USER REGISTRY_PASSWORD
@@ -31,8 +33,8 @@ echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY_HOST}" -u "${REGISTRY_USE
 export REGISTRY_HOST
 export IMAGE_TAG="${NEW_TAG}"
 
-docker compose -f "${COMPOSE_FILE}" pull "${SERVICE}"
-docker compose -f "${COMPOSE_FILE}" up -d "${SERVICE}"
+compose -f "${COMPOSE_FILE}" pull "${SERVICE}"
+compose -f "${COMPOSE_FILE}" up -d --no-deps "${SERVICE}"
 
 ok=0
 for _ in $(seq 1 30); do
@@ -48,8 +50,8 @@ if [[ "${ok}" != 1 ]]; then
   if [[ -n "${PREV}" && "${PREV}" != "${NEW_TAG}" ]]; then
     echo "Attempting rollback to last-good tag: ${PREV}" >&2
     export IMAGE_TAG="${PREV}"
-    docker compose -f "${COMPOSE_FILE}" pull "${SERVICE}"
-    docker compose -f "${COMPOSE_FILE}" up -d "${SERVICE}"
+    compose -f "${COMPOSE_FILE}" pull "${SERVICE}"
+    compose -f "${COMPOSE_FILE}" up -d --no-deps "${SERVICE}"
     sleep 3
     if curl -sfS --max-time 5 "${HEALTH_URL}" >/dev/null; then
       echo "Rollback: service healthy again on ${PREV}" >&2
