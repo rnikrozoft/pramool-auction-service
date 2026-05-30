@@ -20,6 +20,29 @@ func sellerAuctionScopeSQL(scope string) string {
 	}
 }
 
+func sellerAuctionSearchSQL(q string) (clause string, args []interface{}) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return "", nil
+	}
+	pattern := "%" + q + "%"
+	return ` AND (title ILIKE ? OR auction_id ILIKE ?)`, []interface{}{pattern, pattern}
+}
+
+func sellerAuctionSortSQL(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "price":
+		return "current_bid DESC, created_at DESC, auction_id DESC"
+	case "end":
+		return `(CASE WHEN status = 'active' AND end_at > NOW() THEN 0 ELSE 1 END) ASC,
+			(CASE WHEN status = 'active' AND end_at > NOW() THEN end_at END) ASC NULLS LAST,
+			end_at DESC NULLS LAST,
+			auction_id DESC`
+	default:
+		return "created_at DESC, auction_id DESC"
+	}
+}
+
 func (r auctionRepo) CreateAuctionWithTx(ctx context.Context, tx bun.Tx, auction entity.Auction) error {
 	query := `
 	INSERT INTO auctions (
@@ -71,9 +94,11 @@ func (r auctionRepo) CreateAuctionImagesWithTx(ctx context.Context, tx bun.Tx, i
 	return nil
 }
 
-func (r auctionRepo) ListAuctionsBySellerID(ctx context.Context, sellerID, scope string, limit, offset int) ([]entity.Auction, error) {
+func (r auctionRepo) ListAuctionsBySellerID(ctx context.Context, sellerID, scope, q, sort string, limit, offset int) ([]entity.Auction, error) {
 	items := make([]entity.Auction, 0)
 	extra := sellerAuctionScopeSQL(scope)
+	searchClause, searchArgs := sellerAuctionSearchSQL(q)
+	orderBy := sellerAuctionSortSQL(sort)
 	query := `
 	SELECT auction_id, seller_id, title, category, item_condition AS condition, description,
 		start_price, bid_step, current_bid, total_bids, status, end_at, COALESCE(allow_early_close, FALSE) AS allow_early_close,
@@ -82,14 +107,25 @@ func (r auctionRepo) ListAuctionsBySellerID(ctx context.Context, sellerID, scope
 		seller_shipped_at,
 		seller_payout_at,
 		seller_close_pause_bids_until,
-		created_at, updated_at
+		created_at, updated_at,
+		COALESCE(bid_stats.cnt, 0)::bigint AS bidder_count
 	FROM auctions
+	LEFT JOIN LATERAL (
+		SELECT COUNT(*)::bigint AS cnt
+		FROM (
+			SELECT bidder_user_id FROM auction_bids WHERE auction_id = auctions.auction_id
+			UNION
+			SELECT bidder_user_id FROM auction_bid_participants WHERE auction_id = auctions.auction_id
+		) u
+	) bid_stats ON true
 	WHERE seller_id = ?
-	` + extra + `
-	ORDER BY created_at DESC, auction_id DESC
+	` + extra + searchClause + `
+	ORDER BY ` + orderBy + `
 	LIMIT ? OFFSET ?
 	`
-	err := r.bun.NewRaw(query, sellerID, limit, offset).Scan(ctx, &items)
+	args := append([]interface{}{sellerID}, searchArgs...)
+	args = append(args, limit, offset)
+	err := r.bun.NewRaw(query, args...).Scan(ctx, &items)
 	return items, err
 }
 
@@ -109,11 +145,13 @@ func (r auctionRepo) CountSellerAuctionsDisplayActive(ctx context.Context, selle
 	return n, err
 }
 
-func (r auctionRepo) CountAuctionsBySellerIDScoped(ctx context.Context, sellerID, scope string) (int, error) {
+func (r auctionRepo) CountAuctionsBySellerIDScoped(ctx context.Context, sellerID, scope, q string) (int, error) {
 	extra := sellerAuctionScopeSQL(scope)
-	query := `SELECT COUNT(*)::int FROM auctions WHERE seller_id = ? ` + extra
+	searchClause, searchArgs := sellerAuctionSearchSQL(q)
+	query := `SELECT COUNT(*)::int FROM auctions WHERE seller_id = ? ` + extra + searchClause
+	args := append([]interface{}{sellerID}, searchArgs...)
 	var n int
-	err := r.bun.NewRaw(query, sellerID).Scan(ctx, &n)
+	err := r.bun.NewRaw(query, args...).Scan(ctx, &n)
 	return n, err
 }
 

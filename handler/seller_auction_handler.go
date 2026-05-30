@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/rnikrozoft/pramool-auction-service/internal/money"
 	"github.com/rnikrozoft/pramool-auction-service/model/dto"
 	"github.com/rnikrozoft/pramool-auction-service/service"
 )
@@ -21,19 +22,19 @@ func (h *AuctionHandler) CreateSellerAuction(c *fiber.Ctx) error {
 		return responseInternalError(c, errors.New("cannot claims user information"))
 	}
 
-	startPrice, err := strconv.ParseInt(c.FormValue("start_price"), 10, 64)
+	startPrice, err := money.ParseWholeBahtString(c.FormValue("start_price"))
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid start_price"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "ราคาเริ่มต้นต้องเป็นจำนวนเต็มบาท"})
 	}
-	bidStep, err := strconv.ParseInt(c.FormValue("bid_step"), 10, 64)
+	bidStep, err := money.ParseWholeBahtString(c.FormValue("bid_step"))
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid bid_step"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "ขั้นต่ำการเพิ่มราคาต้องเป็นจำนวนเต็มบาท"})
 	}
 	var buyNow int64
 	if v := strings.TrimSpace(c.FormValue("buy_now_price")); v != "" {
-		buyNow, err = strconv.ParseInt(v, 10, 64)
+		buyNow, err = money.ParseWholeBahtString(v)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid buy_now_price"})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "ราคาปิดทันทีต้องเป็นจำนวนเต็มบาท"})
 		}
 	}
 
@@ -128,8 +129,10 @@ func (h *AuctionHandler) ListSellerAuctions(c *fiber.Ctx) error {
 	if scope == "" {
 		scope = "all"
 	}
+	q := strings.TrimSpace(c.Query("q"))
+	sort := strings.TrimSpace(c.Query("sort"))
 
-	result, err := h.svc.ListSellerAuctions(c.Context(), sellerID, scope, limit, offset)
+	result, err := h.svc.ListSellerAuctions(c.Context(), sellerID, scope, q, sort, limit, offset)
 	if err != nil {
 		return responseInternalError(c, err)
 	}

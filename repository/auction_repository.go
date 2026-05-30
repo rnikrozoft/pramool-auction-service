@@ -16,6 +16,8 @@ type AuctionRepository interface {
 	CountPublicAuctions(ctx context.Context, f PublicAuctionFilter) (int, error)
 	ListAuctionImages(ctx context.Context, auctionID string) ([]entity.AuctionImage, error)
 	FindBidderBySubject(ctx context.Context, subject string) (*entity.Bidder, error)
+	GetUserDisplayName(ctx context.Context, userID string) (UserDisplayName, error)
+	GetUserDisplayNamesByIDs(ctx context.Context, userIDs []string) (map[string]UserDisplayName, error)
 
 	LockAuctionForSettlement(ctx context.Context, tx bun.Tx, auctionID string) (AuctionSettlementLock, error)
 	// LockAuctionRowForUpdate locks the auction row for bidding (must be called before LockUserCredit in PlaceBid).
@@ -37,19 +39,35 @@ type AuctionRepository interface {
 	GetWinnerEscrowHoldAmount(ctx context.Context, tx bun.Tx, auctionID, winnerUserID string) (int64, error)
 	MarkAuctionDeliveryCompleted(ctx context.Context, tx bun.Tx, auctionID string) error
 	MarkSellerShipped(ctx context.Context, auctionID, sellerID string) (int64, error)
+	InsertAuctionSellerReview(ctx context.Context, tx bun.Tx, auctionID, buyerUserID, sellerID string, rating float64, sellerPoints int) error
+	AddSellerReviewAggregate(ctx context.Context, tx bun.Tx, sellerID string, sellerPoints int) error
+	HasAuctionSellerReview(ctx context.Context, tx bun.Tx, auctionID string) (bool, error)
+	ListSellerReviewsForAuctions(ctx context.Context, sellerID string, auctionIDs []string) (map[string]SellerAuctionReviewRow, error)
+	GetSellerPublicProfile(ctx context.Context, sellerID string) (SellerPublicProfile, error)
+	GetPublicUserProfileRow(ctx context.Context, userID string) (SellerPublicProfile, time.Time, error)
+	ListSellerActiveAuctionsPublic(ctx context.Context, sellerID string, limit, offset int) ([]PublicAuctionRow, error)
+	ListSellerReviewsReceived(ctx context.Context, sellerID string, limit int) ([]SellerReviewReceivedRow, error)
+	ListAuctionBiddersPublic(ctx context.Context, auctionID string, limit int) ([]AuctionBidderPublicRow, error)
+	// ListAuctionBiddersFromParticipants reads persisted bid history after live auction_bids rows are cleared on settle.
+	ListAuctionBiddersFromParticipants(ctx context.Context, auctionID string, limit int) ([]AuctionBidderPublicRow, error)
 	ZeroEarlyCloseHold(ctx context.Context, tx bun.Tx, auctionID string) error
 	RefundEarlyCloseHold(ctx context.Context, tx bun.Tx, sellerID, auctionID string, amount int64) error
+	InsertPlatformSaleFee(ctx context.Context, tx bun.Tx, auctionID, sellerID, winnerUserID string, winnerEscrow, sellerShare, platformFee int64, payoutEarlyClose bool, sellerKeepPct int64) error
 
 	SelectBidHoldForUpdate(ctx context.Context, tx bun.Tx, auctionID, bidderID string) (oldHeldAmount int64, err error)
 	LockUserCredit(ctx context.Context, tx bun.Tx, userID string) (credit int64, err error)
 	SetUserCredit(ctx context.Context, tx bun.Tx, userID string, credit int64) error
-	UpdateAuctionOnBid(ctx context.Context, tx bun.Tx, auctionID, bidderID string, amount int64) (*entity.Auction, error)
-	InsertAuctionBidRecord(ctx context.Context, tx bun.Tx, auctionID, bidderID string, amount int64) error
+	UpdateAuctionOnBid(ctx context.Context, tx bun.Tx, auctionID, bidderID string, amount int64, newEndAt time.Time) (*entity.Auction, error)
+	UpsertAuctionBidLive(ctx context.Context, tx bun.Tx, auctionID, bidderID string, amount int64) error
+	UpsertAuctionBidParticipant(ctx context.Context, tx bun.Tx, auctionID, bidderID string, amount int64) error
+	ClearAuctionBidsLive(ctx context.Context, tx bun.Tx, auctionID string) error
 	UpsertAuctionBidHold(ctx context.Context, tx bun.Tx, auctionID, bidderID string, heldAmount int64) error
 	InsertBidHoldAdjustmentTransaction(ctx context.Context, tx bun.Tx, bidderID, auctionID string, delta, balanceBefore, balanceAfter, bidAmount int64) error
 
-	// ListMyActiveBids returns auctions where the user still has hold_status='held' and bidding is open.
-	ListMyActiveBids(ctx context.Context, userID string) ([]MyActiveBidRow, error)
+	// ListMyActiveBids returns paginated active bid rows for the buyer dashboard.
+	ListMyActiveBids(ctx context.Context, userID, scope, q, sort string, limit, offset int) ([]MyActiveBidRow, error)
+	CountMyActiveBidsScoped(ctx context.Context, userID, scope, q string) (int, error)
+	CountMyActiveBidTabs(ctx context.Context, userID, q string) (MyActiveBidTabCounts, error)
 
 	// ListMyBidHistory returns auctions the user has placed at least one bid on (excludes own listings).
 	ListMyBidHistory(ctx context.Context, userID string, limit, offset int) ([]MyBidHistoryRow, error)
@@ -57,10 +75,10 @@ type AuctionRepository interface {
 	// Seller listing (migrated from pramool-core).
 	CreateAuctionWithTx(ctx context.Context, tx bun.Tx, auction entity.Auction) error
 	CreateAuctionImagesWithTx(ctx context.Context, tx bun.Tx, images []entity.AuctionImage) error
-	ListAuctionsBySellerID(ctx context.Context, sellerID, scope string, limit, offset int) ([]entity.Auction, error)
+	ListAuctionsBySellerID(ctx context.Context, sellerID, scope, q, sort string, limit, offset int) ([]entity.Auction, error)
 	CountAuctionsBySellerID(ctx context.Context, sellerID string) (int, error)
 	CountSellerAuctionsDisplayActive(ctx context.Context, sellerID string) (int, error)
-	CountAuctionsBySellerIDScoped(ctx context.Context, sellerID, scope string) (int, error)
+	CountAuctionsBySellerIDScoped(ctx context.Context, sellerID, scope, q string) (int, error)
 	InsertListingDepositHoldTx(ctx context.Context, tx bun.Tx, sellerID, auctionID string, holdAmount, balanceBefore, balanceAfter int64, note string) error
 	LockAuctionBySellerForUpdate(ctx context.Context, tx bun.Tx, auctionID, sellerID string) (*entity.Auction, error)
 	CountAuctionBidsTx(ctx context.Context, tx bun.Tx, auctionID string) (int64, error)

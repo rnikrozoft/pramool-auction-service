@@ -49,3 +49,19 @@ func (h *AuctionHub) Broadcast(auctionID string, message dto.AuctionWSMessage) {
 		_ = client.Send(message)
 	}
 }
+
+// RoomSize returns connected WebSocket clients in an auction room (in-memory, single instance).
+func (h *AuctionHub) RoomSize(auctionID string) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.rooms[auctionID])
+}
+
+// NotifyRoomPresence broadcasts type=presence with current viewer_count to everyone in the room.
+func (h *AuctionHub) NotifyRoomPresence(auctionID string) {
+	h.Broadcast(auctionID, dto.AuctionWSMessage{
+		Type:        "presence",
+		AuctionID:   auctionID,
+		ViewerCount: h.RoomSize(auctionID),
+	})
+}

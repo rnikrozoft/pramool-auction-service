@@ -45,11 +45,10 @@ func (r auctionRepo) ListMyBidHistory(ctx context.Context, userID string, limit,
 		FROM (
 			SELECT
 				auction_id,
-				MAX(bid_amount) AS my_max_bid,
-				MAX(placed_at) AS last_bid_at
-			FROM auction_bids
+				max_bid_amount AS my_max_bid,
+				last_bid_at
+			FROM auction_bid_participants
 			WHERE bidder_user_id = ?
-			GROUP BY auction_id
 		) ub
 		INNER JOIN auctions a ON a.auction_id = ub.auction_id
 		WHERE a.seller_id <> ?

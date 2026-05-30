@@ -16,6 +16,8 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/joho/godotenv"
 	"github.com/rnikrozoft/pramool-auction-service/handler"
+	"github.com/rnikrozoft/pramool-auction-service/internal/auctionlive"
+	"github.com/rnikrozoft/pramool-auction-service/internal/config"
 	"github.com/rnikrozoft/pramool-auction-service/internal/telemetry"
 	"github.com/rnikrozoft/pramool-auction-service/middleware"
 	"github.com/rnikrozoft/pramool-auction-service/repository"
@@ -79,11 +81,24 @@ func main() {
 	auctionRepo := repository.NewAuctionRepository(db)
 	userCreditRepo := repository.NewUserCreditRepository(db)
 	hub := service.NewAuctionHub()
+
+	liveCache, err := auctionlive.NewRedisFromURL(auctionlive.RedisURLFromEnv())
+	if err != nil {
+		logger.Warn("redis live bidders disabled", zap.Error(err))
+		liveCache = auctionlive.Noop()
+	} else if liveCache.Enabled() {
+		logger.Info("redis live bidders enabled")
+	}
+	defer func() { _ = auctionlive.Close(liveCache) }()
+
+	platformFees := config.LoadPlatformFeesFromEnv()
 	auctionSvc := service.NewAuctionService(
 		auctionRepo,
 		userCreditRepo,
 		hub,
 		strings.TrimSpace(os.Getenv("ESCROW_AUTO_CONFIRM_DAYS")),
+		liveCache,
+		platformFees,
 	)
 	auctionHandler := handler.NewAuctionHandler(auctionSvc)
 	rt := handler.NewRealtimeHandler(hub, auctionSvc)
@@ -92,7 +107,10 @@ func main() {
 	app.Static("/uploads", "./uploads")
 
 	app.Get("/auctions", auctionHandler.ListAuctions)
+	app.Get("/auctions/presence", rt.AuctionPresence)
+	app.Get("/auctions/:id/bidders", auctionHandler.ListAuctionBidders)
 	app.Get("/auctions/:id", auctionHandler.AuctionDetail)
+	app.Get("/public/users/:id", auctionHandler.PublicUserProfile)
 	app.Get("/my/active-bids", m.JWTMiddleware, auctionHandler.MyActiveBids)
 	app.Get("/my/bid-history", m.JWTMiddleware, auctionHandler.MyBidHistory)
 	app.Post("/auctions/:id/mark-shipped", m.JWTMiddleware, auctionHandler.MarkSellerShipped)

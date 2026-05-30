@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/rnikrozoft/pramool-auction-service/internal/money"
+	"github.com/rnikrozoft/pramool-auction-service/model/dto"
 	"github.com/rnikrozoft/pramool-auction-service/repository"
 	"github.com/rnikrozoft/pramool-auction-service/service"
 )
@@ -45,39 +47,45 @@ func (h *AuctionHandler) ListAuctions(c *fiber.Ctx) error {
 		EndFromDate: strings.TrimSpace(c.Query("end_from")),
 		EndToDate:   strings.TrimSpace(c.Query("end_to")),
 	}
-	if v := strings.TrimSpace(c.Query("min_price")); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			f.MinPrice = &n
-		}
+	if n, ok := optionalWholeBahtQuery(c, "min_price"); ok && n != nil {
+		f.MinPrice = n
 	}
-	if v := strings.TrimSpace(c.Query("max_price")); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			f.MaxPrice = &n
-		}
+	if n, ok := optionalWholeBahtQuery(c, "max_price"); ok && n != nil {
+		f.MaxPrice = n
 	}
-	if v := strings.TrimSpace(c.Query("min_start_price")); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			f.MinStartPrice = &n
-		}
+	if n, ok := optionalWholeBahtQuery(c, "min_start_price"); ok && n != nil {
+		f.MinStartPrice = n
 	}
-	if v := strings.TrimSpace(c.Query("max_start_price")); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			f.MaxStartPrice = &n
-		}
+	if n, ok := optionalWholeBahtQuery(c, "max_start_price"); ok && n != nil {
+		f.MaxStartPrice = n
 	}
-	if v := strings.TrimSpace(c.Query("min_bid_step")); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			f.MinBidStep = &n
-		}
+	if n, ok := optionalWholeBahtQuery(c, "min_bid_step"); ok && n != nil {
+		f.MinBidStep = n
 	}
-	if v := strings.TrimSpace(c.Query("max_bid_step")); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			f.MaxBidStep = &n
-		}
+	if n, ok := optionalWholeBahtQuery(c, "max_bid_step"); ok && n != nil {
+		f.MaxBidStep = n
 	}
 
 	result, err := h.svc.ListPublicAuctions(c.Context(), f)
 	if err != nil {
+		return responseInternalError(c, err)
+	}
+	return c.Status(fiber.StatusOK).JSON(result)
+}
+
+func (h *AuctionHandler) ListAuctionBidders(c *fiber.Ctx) error {
+	auctionID := strings.TrimSpace(c.Params("id"))
+	limit := 50
+	if v := strings.TrimSpace(c.Query("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	result, err := h.svc.ListAuctionBidders(c.Context(), auctionID, limit)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "missing") {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+		}
 		return responseInternalError(c, err)
 	}
 	return c.Status(fiber.StatusOK).JSON(result)
@@ -100,7 +108,25 @@ func (h *AuctionHandler) MyActiveBids(c *fiber.Ctx) error {
 	if strings.TrimSpace(userID) == "" {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"message": "unauthorized"})
 	}
-	result, err := h.svc.MyActiveBids(c.Context(), userID)
+	limit := 10
+	if v := strings.TrimSpace(c.Query("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	offset := 0
+	if v := strings.TrimSpace(c.Query("offset")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	scope := strings.TrimSpace(c.Query("scope"))
+	if scope == "" {
+		scope = "all"
+	}
+	q := strings.TrimSpace(c.Query("q"))
+	sort := strings.TrimSpace(c.Query("sort"))
+	result, err := h.svc.MyActiveBids(c.Context(), userID, scope, q, sort, limit, offset)
 	if err != nil {
 		return responseInternalError(c, err)
 	}
@@ -158,12 +184,19 @@ func (h *AuctionHandler) ConfirmBuyerReceived(c *fiber.Ctx) error {
 	if auctionID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid auction"})
 	}
-	if err := h.svc.ConfirmBuyerReceived(c.Context(), auctionID, userID); err != nil {
+	var body dto.ConfirmReceivedRequest
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid request body"})
+	}
+	if err := h.svc.ConfirmBuyerReceived(c.Context(), auctionID, userID, body.Rating); err != nil {
 		if errors.Is(err, service.ErrNotAuctionWinner) {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"message": "เฉพาะผู้ชนะประมูลเท่านั้นที่ยืนยันรับของได้"})
 		}
 		if errors.Is(err, service.ErrSellerMustShipFirst) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "รอผู้ขายบันทึกจัดส่งก่อน"})
+		}
+		if errors.Is(err, service.ErrInvalidSellerRating) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "กรุณาให้คะแนนผู้ขาย 0.5–5 ดาว (กดได้ครึ่งดาว)"})
 		}
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
@@ -180,4 +213,17 @@ func (h *AuctionHandler) CloseEarly(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{"message": "accepted"})
+}
+
+// optionalWholeBahtQuery parses a whole-baht filter query param; invalid decimals are ignored (nil, true).
+func optionalWholeBahtQuery(c *fiber.Ctx, key string) (*int64, bool) {
+	v := strings.TrimSpace(c.Query(key))
+	if v == "" {
+		return nil, true
+	}
+	n, err := money.ParseWholeBahtString(v)
+	if err != nil {
+		return nil, false
+	}
+	return &n, true
 }

@@ -52,6 +52,9 @@ type AuctionDetailResponse struct {
 	BuyNowPrice int64 `json:"buy_now_price"`
 	/** RFC3339 — ถ้ามีและเวลาปัจจุบันยังไม่ถึง ระบบไม่รับบิด (ผู้ขายกำลังปิดประมูล) */
 	BiddingPausedUntil string `json:"bidding_paused_until,omitempty"`
+	SellerDisplayName     string  `json:"seller_display_name,omitempty"`
+	SellerReviewAvgRating float64 `json:"seller_review_avg_rating,omitempty"` // 0.5–5 stars; 0 = no reviews
+	SellerReviewCount     int     `json:"seller_review_count,omitempty"`
 }
 
 type PlaceBidResult struct {
@@ -61,6 +64,8 @@ type PlaceBidResult struct {
 	TotalBids       int64  `json:"total_bids"`
 	RemainingCredit int64  `json:"remaining_credit"`
 	AuctionClosed   bool   `json:"auction_closed"`
+	/** RFC3339 — เวลาปิดหลังขยายจากการบิด (ไม่ส่งเมื่อปิดด้วย buy-now ทันที) */
+	EndAt string `json:"end_at,omitempty"`
 }
 
 type CloseEarlyRequest struct {
@@ -86,7 +91,16 @@ type MyActiveBidItem struct {
 }
 
 type MyActiveBidsResponse struct {
-	Items []MyActiveBidItem `json:"items"`
+	Items           []MyActiveBidItem `json:"items"`
+	Total           int               `json:"total"`
+	AllCount        int               `json:"all_count"`
+	ActiveCount     int               `json:"active_count"`
+	EndingSoonCount int               `json:"ending_soon_count"`
+	OutbidCount     int               `json:"outbid_count"`
+	ClosedCount     int               `json:"closed_count"`
+	Limit           int               `json:"limit"`
+	Offset          int               `json:"offset"`
+	Scope           string            `json:"scope"`
 }
 
 // MyBidHistoryItem is one row for GET /my/bid-history (outcome: active | outbid | won | lost).

@@ -13,6 +13,8 @@ type Auction struct {
 	BidStep              int64     `db:"bid_step"`
 	CurrentBid           int64     `db:"current_bid"`
 	TotalBids            int64     `db:"total_bids"`
+	/** Populated on seller list query — distinct users who placed at least one bid. */
+	BidderCount          int64     `db:"bidder_count" bun:"bidder_count"`
 	Status               string    `db:"status"`
 	EndAt                time.Time `db:"end_at"`
 	AllowEarlyClose      bool      `db:"allow_early_close"`

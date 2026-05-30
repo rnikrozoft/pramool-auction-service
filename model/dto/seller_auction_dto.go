@@ -37,6 +37,7 @@ type SellerAuctionItem struct {
 	BidStep             int64  `json:"bid_step"`
 	CurrentBid          int64  `json:"current_bid"`
 	TotalBids           int64  `json:"total_bids"`
+	BidderCount         int64  `json:"bidder_count"`
 	EndAt               string `json:"end_at"`
 	CoverImageURL       string `json:"cover_image_url"`
 	BuyNowPrice         int64  `json:"buy_now_price"`
@@ -46,4 +47,11 @@ type SellerAuctionItem struct {
 	SellerShippedAt     string `json:"seller_shipped_at,omitempty"`
 	/** RFC3339 — ผู้ขายเริ่มปิดก่อนเวลา ยังไม่รับบิด */
 	BiddingPausedUntil string `json:"bidding_paused_until,omitempty"`
+	/** คะแนนดาวจากผู้ซื้อ (0.5–5) หลังยืนยันรับของ */
+	BuyerRating float64 `json:"buyer_rating,omitempty"`
+	/** คะแนนที่ผู้ขายได้จากรีวิว (= ดาว × 2) */
+	BuyerReviewPoints int `json:"buyer_review_points,omitempty"`
+	/** ชื่อผู้ชนะ — มีเมื่อปิดประมูลแล้วและมี winner_id */
+	WinnerDisplayName string `json:"winner_display_name,omitempty"`
+	WinnerID          string `json:"winner_id,omitempty"`
 }
