@@ -2,23 +2,33 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
+	"github.com/rnikrozoft/pramool-auction-service/internal/auctionlive"
 	"github.com/rnikrozoft/pramool-auction-service/internal/money"
 	"github.com/rnikrozoft/pramool-auction-service/model/dto"
 	"github.com/rnikrozoft/pramool-auction-service/service"
 )
 
 type RealtimeHandler struct {
-	hub *service.AuctionHub
-	svc service.AuctionService
+	hub      *service.AuctionHub
+	svc      service.AuctionService
+	wsFanout auctionlive.WSFanout
 }
 
-func NewRealtimeHandler(hub *service.AuctionHub, svc service.AuctionService) *RealtimeHandler {
-	return &RealtimeHandler{hub: hub, svc: svc}
+func NewRealtimeHandler(hub *service.AuctionHub, svc service.AuctionService, wsFanout auctionlive.WSFanout) *RealtimeHandler {
+	if wsFanout == nil {
+		wsFanout = auctionlive.LocalWSFanout()
+	}
+	return &RealtimeHandler{hub: hub, svc: svc, wsFanout: wsFanout}
+}
+
+func (h *RealtimeHandler) deliverLocal(auctionID string, message dto.AuctionWSMessage) {
+	h.hub.Broadcast(auctionID, message)
 }
 
 // AuctionPresence returns in-memory WebSocket viewer counts per auction (GET /auctions/presence?ids=a,b,c).
@@ -96,7 +106,14 @@ func (h *RealtimeHandler) AuctionWS(conn *websocket.Conn) {
 		}
 		out, err := h.svc.PlaceBid(ctx, auctionID, userID, req.Amount)
 		if err != nil {
-			_ = client.Send(dto.AuctionWSMessage{Type: "error", Message: err.Error()})
+			msg := err.Error()
+			if errors.Is(err, service.ErrBidBanned) {
+				msg = "บัญชีถูกระงับการประมูล"
+			}
+			if errors.Is(err, service.ErrCreditDebt) {
+				msg = "คุณมียอดค้างชำระ กรุณาเติมเครดิตให้ครบก่อนประมูล"
+			}
+			_ = client.Send(dto.AuctionWSMessage{Type: "error", Message: msg})
 			continue
 		}
 		bidderID := out.BidderID
@@ -112,7 +129,7 @@ func (h *RealtimeHandler) AuctionWS(conn *websocket.Conn) {
 			TotalBids:  out.TotalBids,
 			EndAt:      out.EndAt,
 		}
-		h.hub.Broadcast(auctionID, bidUpdate)
+		_ = h.wsFanout.Publish(ctx, auctionID, bidUpdate, h.deliverLocal)
 		_ = client.Send(dto.AuctionWSMessage{
 			Type:            "bid_ack",
 			AuctionID:       auctionID,

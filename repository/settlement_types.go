@@ -10,6 +10,9 @@ type AuctionSettlementLock struct {
 	CurrentBid                 int64
 	StartPrice                 int64
 	AllowEarlyClose            bool
+	AutoRenew                  bool
+	TotalBids                  int64
+	CreatedAt                  time.Time
 	EarlyCloseHoldAmount      int64
 	SellerClosePauseBidsUntil *time.Time
 }
@@ -26,7 +29,13 @@ type EscrowReleaseLock struct {
 	WinnerID         string
 	StartPrice       int64
 	PayoutEarlyClose bool
-	SellerShipped    bool
-	PayoutDone       bool
-	SellerShippedAt  *time.Time // nil if not yet shipped
+	SellerShipped     bool
+	PayoutDone        bool
+	BuyerReceivedDone bool
+	SellerShippedAt         *time.Time // nil if not yet shipped
+	AdminConfirmDeadlineAt  *time.Time
+	ShipmentStatus          string
+	CreatedAt         time.Time
+	EndAt             time.Time
+	AutoRenew         bool
 }

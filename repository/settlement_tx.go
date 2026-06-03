@@ -13,13 +13,14 @@ import (
 func (r auctionRepo) LockAuctionRowForUpdate(ctx context.Context, tx bun.Tx, auctionID string) (*entity.Auction, error) {
 	item := new(entity.Auction)
 	err := tx.QueryRowContext(ctx, `
-		SELECT auction_id, seller_id, title, category, item_condition, description,
+		SELECT auction_id, seller_id, title, category, description,
 			start_price, bid_step, current_bid, total_bids, status, end_at,
 			COALESCE(allow_early_close, FALSE),
+			COALESCE(allow_bid_cancel, FALSE),
 			COALESCE(early_close_hold_amount, 0),
 			COALESCE(buy_now_price, 0),
 			cover_image_url,
-			COALESCE(winner_id, ''),
+			COALESCE(winner_id::text, ''),
 			seller_shipped_at, buyer_received_at, seller_payout_at,
 			COALESCE(payout_early_close, FALSE),
 			seller_close_pause_bids_until,
@@ -28,9 +29,9 @@ func (r auctionRepo) LockAuctionRowForUpdate(ctx context.Context, tx bun.Tx, auc
 		WHERE auction_id = ?
 		FOR UPDATE
 	`, auctionID).Scan(
-		&item.AuctionID, &item.SellerID, &item.Title, &item.Category, &item.Condition,
+		&item.AuctionID, &item.SellerID, &item.Title, &item.Category,
 		&item.Description, &item.StartPrice, &item.BidStep, &item.CurrentBid, &item.TotalBids,
-		&item.Status, &item.EndAt, &item.AllowEarlyClose, &item.EarlyCloseHoldAmount,
+		&item.Status, &item.EndAt, &item.AllowEarlyClose, &item.AllowBidCancel, &item.EarlyCloseHoldAmount,
 		&item.BuyNowPrice,
 		&item.CoverImageURL, &item.WinnerID, &item.SellerShippedAt, &item.BuyerReceivedAt, &item.SellerPayoutAt,
 		&item.PayoutEarlyClose, &item.SellerClosePauseBidsUntil, &item.CreatedAt, &item.UpdatedAt,
@@ -70,12 +71,15 @@ func (r auctionRepo) LockAuctionForSettlement(ctx context.Context, tx bun.Tx, au
 	err := tx.QueryRowContext(ctx, `
 		SELECT seller_id, status, end_at, current_bid, start_price,
 			COALESCE(allow_early_close, FALSE),
+			COALESCE(auto_renew, FALSE),
+			COALESCE(total_bids, 0),
+			created_at,
 			COALESCE(early_close_hold_amount, 0),
 			seller_close_pause_bids_until
 		FROM auctions
 		WHERE auction_id = ?
 		FOR UPDATE
-	`, auctionID).Scan(&row.SellerID, &row.Status, &row.EndAt, &row.CurrentBid, &row.StartPrice, &row.AllowEarlyClose, &row.EarlyCloseHoldAmount, &row.SellerClosePauseBidsUntil)
+	`, auctionID).Scan(&row.SellerID, &row.Status, &row.EndAt, &row.CurrentBid, &row.StartPrice, &row.AllowEarlyClose, &row.AutoRenew, &row.TotalBids, &row.CreatedAt, &row.EarlyCloseHoldAmount, &row.SellerClosePauseBidsUntil)
 	return row, err
 }
 
@@ -222,19 +226,29 @@ func (r auctionRepo) MoveWinningHoldToEscrow(ctx context.Context, tx bun.Tx, auc
 func (r auctionRepo) LockAuctionForEscrowRelease(ctx context.Context, tx bun.Tx, auctionID string) (EscrowReleaseLock, error) {
 	var row EscrowReleaseLock
 	var shippedAt sql.NullTime
+	var adminConfirm sql.NullTime
 	err := tx.QueryRowContext(ctx, `
-		SELECT seller_id, COALESCE(winner_id, ''), start_price, COALESCE(payout_early_close, FALSE),
-			(seller_shipped_at IS NOT NULL), (seller_payout_at IS NOT NULL), seller_shipped_at
+		SELECT seller_id, COALESCE(winner_id::text, ''), start_price, COALESCE(payout_early_close, FALSE),
+			(seller_shipped_at IS NOT NULL), (seller_payout_at IS NOT NULL),
+			(buyer_received_at IS NOT NULL), seller_shipped_at,
+			admin_confirm_deadline_at,
+			COALESCE(shipment_status, 'pending'),
+			created_at, end_at,
+			COALESCE(auto_renew, FALSE)
 		FROM auctions
 		WHERE auction_id = ?
 		FOR UPDATE
-	`, auctionID).Scan(&row.SellerID, &row.WinnerID, &row.StartPrice, &row.PayoutEarlyClose, &row.SellerShipped, &row.PayoutDone, &shippedAt)
+	`, auctionID).Scan(&row.SellerID, &row.WinnerID, &row.StartPrice, &row.PayoutEarlyClose, &row.SellerShipped, &row.PayoutDone, &row.BuyerReceivedDone, &shippedAt, &adminConfirm, &row.ShipmentStatus, &row.CreatedAt, &row.EndAt, &row.AutoRenew)
 	if err != nil {
 		return row, err
 	}
 	if shippedAt.Valid {
 		t := shippedAt.Time
 		row.SellerShippedAt = &t
+	}
+	if adminConfirm.Valid {
+		t := adminConfirm.Time
+		row.AdminConfirmDeadlineAt = &t
 	}
 	return row, nil
 }
@@ -256,21 +270,4 @@ func (r auctionRepo) MarkAuctionDeliveryCompleted(ctx context.Context, tx bun.Tx
 		WHERE auction_id = ?
 	`, auctionID)
 	return err
-}
-
-func (r auctionRepo) MarkSellerShipped(ctx context.Context, auctionID, sellerID string) (int64, error) {
-	res, err := r.bun.ExecContext(ctx, `
-		UPDATE auctions
-		SET seller_shipped_at = NOW(), updated_at = NOW()
-		WHERE auction_id = ?
-		  AND seller_id = ?
-		  AND status = 'closed'
-		  AND COALESCE(NULLIF(TRIM(winner_id), ''), '') <> ''
-		  AND seller_shipped_at IS NULL
-		  AND seller_payout_at IS NULL
-	`, auctionID, sellerID)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
 }

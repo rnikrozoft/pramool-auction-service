@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -25,47 +24,57 @@ var (
 	ErrCannotBidOwn          = errors.New("cannot bid own auction")
 	ErrAuctionClosed         = errors.New("auction is closed")
 	ErrInsufficientCredit    = errors.New("insufficient credit")
+	ErrCreditDebt            = errors.New("credit debt")
 	ErrCannotCloseEarly      = errors.New("cannot close auction early")
 	ErrNotAuctionSeller      = errors.New("not auction seller")
 	ErrNotAuctionWinner      = errors.New("not auction winner")
 	ErrSellerMustShipFirst   = errors.New("seller must mark shipped first")
 	ErrMarkShippedNotAllowed = errors.New("cannot mark shipped for this auction")
+	ErrShipmentNotDelivered    = errors.New("shipment not delivered yet")
 	// ErrSellerClosingAuction — ผู้ขายเริ่มปิดก่อนเวลา ช่วงหน่วงไม่รับบิด
 	ErrSellerClosingAuction = errors.New("bidding paused: seller is closing this auction")
 	// ErrAuctionReopenNotAllowed is returned when reopen preconditions are not met.
 	ErrAuctionReopenNotAllowed = errors.New("auction cannot be reopened: must be closed with no bids")
 	// ErrAuctionDeleteNotAllowed is returned when delete preconditions are not met (same eligibility as reopen).
 	ErrAuctionDeleteNotAllowed = errors.New("auction cannot be deleted: must be closed with no bids")
+	ErrPostingBanned           = errors.New("account banned from creating new listings")
+	ErrBidBanned               = errors.New("account banned from bidding")
+	ErrCannotReportOwn         = errors.New("cannot report own auction")
+	ErrBidCancelNotAllowed     = errors.New("bid cancel is not enabled for this auction")
+	ErrNoBidToCancel           = errors.New("no active bid to cancel")
 )
 
 // sellerEarlyClosePauseDuration หลังผู้ขายกดปิดก่อนเวลา — ไม่รับบิดแล้วค่อย settle
 const sellerEarlyClosePauseDuration = 3 * time.Second
 
-// bidExtensionDuration — ทุกครั้งที่มีการบิดสำเร็จ ขยายเวลาปิดออกจาก max(end_at, now)
+// bidExtensionDuration — ทุกครั้งที่มีการบิดสำเร็จ หรือยกเลิกการบิด (เมื่อเปิดตัวเลือก) ขยายเวลาปิดออกจาก max(end_at, now)
 const bidExtensionDuration = 10 * time.Minute
+
+func extendAuctionEndAt(currentEnd, now time.Time) time.Time {
+	newEndAt := currentEnd
+	if now.After(newEndAt) {
+		newEndAt = now
+	}
+	return newEndAt.Add(bidExtensionDuration)
+}
 
 const (
 	maxSellerCategories = 5
 	maxTitleRunes       = 255
-	maxConditionRunes   = 100
 	maxDescriptionRunes = 5000
 )
 
-// sellerCategoryWhitelist ต้องตรงกับตัวเลือกหมวดในแบบฟอร์มสร้างประมูล (pramool.in.th)
-var sellerCategoryWhitelist = map[string]struct{}{
-	"เครื่องใช้ไฟฟ้า": {},
-	"โทรศัพท์มือถือ": {},
-	"แท็บเล็ต":       {},
-	"คอมพิวเตอร์":    {},
-	"กล้องถ่ายรูป":   {},
-	"แฟชั่น":        {},
-	"ของสะสม":       {},
-	"อื่นๆ":          {},
-	"เกมคอนโซล":     {},
-	"กระเป๋า":       {},
-}
+// normalizeSellerCategories validates pipe-separated category names against product_categories.
+func (s auctionSvc) normalizeSellerCategories(ctx context.Context, raw string) (string, error) {
+	allowedNames, err := s.repo.ListActiveProductCategoryNames(ctx)
+	if err != nil {
+		return "", fmt.Errorf("load categories: %w", err)
+	}
+	allowed := make(map[string]struct{}, len(allowedNames))
+	for _, name := range allowedNames {
+		allowed[name] = struct{}{}
+	}
 
-func normalizeSellerCategories(raw string) (string, error) {
 	parts := strings.Split(raw, "|")
 	var out []string
 	seen := map[string]bool{}
@@ -74,7 +83,7 @@ func normalizeSellerCategories(raw string) (string, error) {
 		if t == "" {
 			continue
 		}
-		if _, ok := sellerCategoryWhitelist[t]; !ok {
+		if _, ok := allowed[t]; !ok {
 			return "", fmt.Errorf("invalid category")
 		}
 		if seen[t] {
@@ -93,53 +102,66 @@ func normalizeSellerCategories(raw string) (string, error) {
 }
 
 type AuctionService interface {
+	SweepFulfillmentTimeouts(ctx context.Context)
 	ListPublicAuctions(ctx context.Context, filter repository.PublicAuctionFilter) (*dto.AuctionListResponse, error)
 	GetPublicUserProfile(ctx context.Context, userID string, activeLimit, reviewsLimit int) (*dto.PublicUserProfileResponse, error)
+	ListPublicUserClosedAuctions(ctx context.Context, userID string, limit, offset int) (*dto.AuctionListResponse, error)
 	GetAuctionDetail(ctx context.Context, auctionID string) (*dto.AuctionDetailResponse, error)
 	ListAuctionBidders(ctx context.Context, auctionID string, limit int) (*dto.PublicAuctionBiddersResponse, error)
 	PlaceBid(ctx context.Context, auctionID, bidderSubject string, amount int64) (*dto.PlaceBidResult, error)
+	CancelBid(ctx context.Context, auctionID, bidderSubject string) (*dto.CancelBidResult, error)
 	CloseAuctionEarly(ctx context.Context, auctionID, sellerID string) error
-	MyActiveBids(ctx context.Context, userID, scope, q, sort string, limit, offset int) (*dto.MyActiveBidsResponse, error)
-	MyBidHistory(ctx context.Context, userID string, limit, offset int) (*dto.MyBidHistoryResponse, error)
-	MarkSellerShipped(ctx context.Context, auctionID, sellerUserID string) error
-	ConfirmBuyerReceived(ctx context.Context, auctionID, buyerUserID string, sellerRating float64) error
+	MyActiveBids(ctx context.Context, userID, scope, q, sort, order string, limit, offset int) (*dto.MyActiveBidsResponse, error)
+	MyBidHistory(ctx context.Context, userID, scope, q, sort, order string, limit, offset int) (*dto.MyBidHistoryResponse, error)
+	ConfirmBuyerReceived(ctx context.Context, auctionID, buyerUserID string, sellerRating float64, comment string) error
 
 	CreateSellerAuction(ctx context.Context, sellerID string, req dto.CreateAuctionRequest, imagePaths []string) (*dto.CreateAuctionResponse, error)
-	ListSellerAuctions(ctx context.Context, sellerID, scope, q, sort string, limit, offset int) (*dto.SellerAuctionListResponse, error)
+	ListSellerAuctions(ctx context.Context, sellerID, scope, q, sort, order string, limit, offset int) (*dto.SellerAuctionListResponse, error)
 	ReopenSellerAuctionNoBids(ctx context.Context, sellerID, auctionID, endAtRFC3339 string) error
 	DeleteSellerAuctionClosedNoBids(ctx context.Context, sellerID, auctionID string) error
+	ListProductCategories(ctx context.Context) ([]string, error)
+	ReportAuction(ctx context.Context, auctionID, reporterUserID, reason string) (*dto.ReportAuctionResponse, error)
+	ListingFees(ctx context.Context) dto.ListingFeesResponse
 }
 
 type auctionSvc struct {
 	repo                  repository.AuctionRepository
 	userCredit            repository.UserCreditRepository
+	userSuspension        *repository.UserSuspensionRepository
 	hub                   *AuctionHub
 	liveCache             auctionlive.Cache
-	escrowAutoConfirmDays int
-	platformFees          config.PlatformFeesConfig
+	policy                *PlatformPolicyLoader
 }
 
-// NewAuctionService constructs the auction service. escrowAutoConfirmDaysEnv is the raw value of
-// ESCROW_AUTO_CONFIRM_DAYS: empty defaults to 14 calendar days after seller_shipped_at; "0" disables auto-release.
-// liveCache may be auctionlive.Noop() when Redis is not configured.
+// NewAuctionService constructs the auction service.
 func NewAuctionService(
 	repo repository.AuctionRepository,
 	userCredit repository.UserCreditRepository,
+	userSuspension *repository.UserSuspensionRepository,
 	hub *AuctionHub,
-	escrowAutoConfirmDaysEnv string,
 	liveCache auctionlive.Cache,
-	platformFees config.PlatformFeesConfig,
+	policy *PlatformPolicyLoader,
 ) AuctionService {
 	if liveCache == nil {
 		liveCache = auctionlive.Noop()
 	}
 	return auctionSvc{
-		repo:                  repo,
-		userCredit:            userCredit,
-		hub:                   hub,
-		liveCache:             liveCache,
-		escrowAutoConfirmDays: parseEscrowAutoConfirmDays(escrowAutoConfirmDaysEnv),
-		platformFees:          platformFees,
+		repo:           repo,
+		userCredit:     userCredit,
+		userSuspension: userSuspension,
+		hub:            hub,
+		liveCache:      liveCache,
+		policy:         policy,
+	}
+}
+
+func (s auctionSvc) SweepFulfillmentTimeouts(ctx context.Context) {
+	ids, err := s.repo.ListFulfillmentSweepAuctionIDs(ctx, 100)
+	if err != nil {
+		return
+	}
+	for _, id := range ids {
+		s.processFulfillmentTimeouts(ctx, id)
 	}
 }
 
@@ -185,15 +207,60 @@ func (s auctionSvc) biddersFromPG(ctx context.Context, auctionID string, limit i
 	return items, nil
 }
 
-func parseEscrowAutoConfirmDays(env string) int {
-	if env == "" {
-		return 14
+func abbreviateSellerDisplayName(firstName, lastName string) string {
+	firstName = strings.TrimSpace(firstName)
+	lastName = strings.TrimSpace(lastName)
+	if firstName == "" && lastName == "" {
+		return "ผู้ขาย"
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(env))
-	if err != nil || n < 0 {
-		return 14
+	if lastName == "" {
+		return firstName
 	}
-	return n
+	r, _ := utf8.DecodeRuneInString(lastName)
+	if firstName == "" {
+		return string(r) + "."
+	}
+	return firstName + " " + string(r) + "."
+}
+
+// sellerAvgRatingFromAggregate converts cumulative star points (reputation_points) to 0.5–5 average.
+// Penalties and admin adjustments lower the same pool as review points (rating×2 per review).
+func sellerAvgRatingFromAggregate(starPointsTotal int64, reviewCount int) float64 {
+	if reviewCount <= 0 {
+		return 0
+	}
+	avg := float64(starPointsTotal) / float64(reviewCount) / 2.0
+	if avg < 0 {
+		avg = 0
+	}
+	if avg > 5 {
+		avg = 5
+	}
+	return math.Round(avg*10) / 10
+}
+
+func publicAuctionRowToListItem(row repository.PublicAuctionRow) dto.AuctionListItem {
+	item := dto.AuctionListItem{
+		AuctionID:         row.AuctionID,
+		Title:             row.Title,
+		Category:          row.Category,
+		StartPrice:        row.StartPrice,
+		CurrentBid:        row.CurrentBid,
+		BidStep:           row.BidStep,
+		TotalBids:         row.TotalBids,
+		BidderCount:       row.BidderCount,
+		EndAt:             row.EndAt.Format(time.RFC3339),
+		Status:            row.Status,
+		CoverImageURL:     row.CoverImageURL,
+		BuyNowPrice:       row.BuyNowPrice,
+		AllowEarlyClose:   row.AllowEarlyClose,
+		AllowBidCancel:    row.AllowBidCancel,
+		SellerID:          row.SellerID,
+		SellerDisplayName: abbreviateSellerDisplayName(row.SellerFirstName, row.SellerLastName),
+		SellerReviewCount: row.SellerReviewCount,
+	}
+	item.SellerReviewAvgRating = sellerAvgRatingFromAggregate(row.SellerReputationPoints, row.SellerReviewCount)
+	return item
 }
 
 func (s auctionSvc) ListPublicAuctions(ctx context.Context, filter repository.PublicAuctionFilter) (*dto.AuctionListResponse, error) {
@@ -207,20 +274,7 @@ func (s auctionSvc) ListPublicAuctions(ctx context.Context, filter repository.Pu
 	}
 	items := make([]dto.AuctionListItem, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, dto.AuctionListItem{
-			AuctionID:       row.AuctionID,
-			Title:           row.Title,
-			Category:        row.Category,
-			StartPrice:      row.StartPrice,
-			CurrentBid:      row.CurrentBid,
-			BidStep:         row.BidStep,
-			TotalBids:       row.TotalBids,
-			BidderCount:     row.BidderCount,
-			EndAt:           row.EndAt.Format(time.RFC3339),
-			CoverImageURL:   row.CoverImageURL,
-			BuyNowPrice:     row.BuyNowPrice,
-			AllowEarlyClose: row.AllowEarlyClose,
-		})
+		items = append(items, publicAuctionRowToListItem(row))
 	}
 	limit := filter.Limit
 	if limit <= 0 {
@@ -267,11 +321,7 @@ func (s auctionSvc) GetPublicUserProfile(ctx context.Context, userID string, act
 		displayName = "ผู้ใช้"
 	}
 
-	avgRating := 0.0
-	if profile.ReviewCount > 0 && profile.ReviewPointsTotal > 0 {
-		avgRating = float64(profile.ReviewPointsTotal) / float64(profile.ReviewCount) / 2.0
-		avgRating = math.Round(avgRating*10) / 10
-	}
+	avgRating := sellerAvgRatingFromAggregate(profile.ReputationPoints, profile.ReviewCount)
 
 	activeTotal, err := s.repo.CountSellerAuctionsDisplayActive(ctx, userID)
 	if err != nil {
@@ -284,20 +334,16 @@ func (s auctionSvc) GetPublicUserProfile(ctx context.Context, userID string, act
 	}
 	activeItems := make([]dto.AuctionListItem, 0, len(auctionRows))
 	for _, row := range auctionRows {
-		activeItems = append(activeItems, dto.AuctionListItem{
-			AuctionID:       row.AuctionID,
-			Title:           row.Title,
-			Category:        row.Category,
-			StartPrice:      row.StartPrice,
-			CurrentBid:      row.CurrentBid,
-			BidStep:         row.BidStep,
-			TotalBids:       row.TotalBids,
-			BidderCount:     row.BidderCount,
-			EndAt:           row.EndAt.Format(time.RFC3339),
-			CoverImageURL:   row.CoverImageURL,
-			BuyNowPrice:     row.BuyNowPrice,
-			AllowEarlyClose: row.AllowEarlyClose,
-		})
+		item := publicAuctionRowToListItem(row)
+		item.SellerID = userID
+		if item.SellerDisplayName == "" || item.SellerDisplayName == "ผู้ขาย" {
+			item.SellerDisplayName = abbreviateSellerDisplayName(profile.FirstName, profile.LastName)
+		}
+		if item.SellerReviewCount == 0 && profile.ReviewCount > 0 {
+			item.SellerReviewCount = profile.ReviewCount
+			item.SellerReviewAvgRating = sellerAvgRatingFromAggregate(profile.ReputationPoints, profile.ReviewCount)
+		}
+		activeItems = append(activeItems, item)
 	}
 
 	reviewRows, err := s.repo.ListSellerReviewsReceived(ctx, userID, reviewsLimit)
@@ -310,6 +356,7 @@ func (s auctionSvc) GetPublicUserProfile(ctx context.Context, userID string, act
 			AuctionID:    row.AuctionID,
 			AuctionTitle: row.AuctionTitle,
 			Rating:       row.Rating,
+			Comment:      row.Comment,
 			CreatedAt:    row.CreatedAt.Format(time.RFC3339),
 		})
 	}
@@ -320,10 +367,59 @@ func (s auctionSvc) GetPublicUserProfile(ctx context.Context, userID string, act
 		MemberSince:         memberSince.Format(time.RFC3339),
 		ReviewAvgRating:     avgRating,
 		ReviewCount:         profile.ReviewCount,
+		SellerNoShipCount:   profile.NoShipCount,
 		ActiveAuctions:      activeItems,
 		ActiveAuctionsTotal: activeTotal,
 		Reviews:             reviews,
 	}, nil
+}
+
+func (s auctionSvc) ListPublicUserClosedAuctions(ctx context.Context, userID string, limit, offset int) (*dto.AuctionListResponse, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("missing user id")
+	}
+	if limit <= 0 {
+		limit = 24
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	profile, _, err := s.repo.GetPublicUserProfileRow(ctx, userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("user not found")
+		}
+		return nil, err
+	}
+
+	total, err := s.repo.CountSellerClosedAuctionsPublic(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.repo.ListSellerClosedAuctionsPublic(ctx, userID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]dto.AuctionListItem, 0, len(rows))
+	for _, row := range rows {
+		item := publicAuctionRowToListItem(row)
+		item.SellerID = userID
+		if item.SellerDisplayName == "" || item.SellerDisplayName == "ผู้ขาย" {
+			item.SellerDisplayName = abbreviateSellerDisplayName(profile.FirstName, profile.LastName)
+		}
+		if item.SellerReviewCount == 0 && profile.ReviewCount > 0 {
+			item.SellerReviewCount = profile.ReviewCount
+			item.SellerReviewAvgRating = sellerAvgRatingFromAggregate(profile.ReputationPoints, profile.ReviewCount)
+		}
+		items = append(items, item)
+	}
+	return &dto.AuctionListResponse{Items: items, Total: total, Limit: limit, Offset: offset}, nil
 }
 
 func (s auctionSvc) ListAuctionBidders(ctx context.Context, auctionID string, limit int) (*dto.PublicAuctionBiddersResponse, error) {
@@ -418,7 +514,10 @@ func (s auctionSvc) GetAuctionDetail(ctx context.Context, auctionID string) (*dt
 	if err := mapAuctionDetailLookupErr(s.settleAuctionIfEnded(ctx, auctionID)); err != nil {
 		return nil, err
 	}
-	if err := mapAuctionDetailLookupErr(s.autoConfirmEscrowIfDue(ctx, auctionID)); err != nil {
+	if err := mapAuctionDetailLookupErr(s.autoReleaseEscrowIfDelivered(ctx, auctionID)); err != nil {
+		return nil, err
+	}
+	if err := mapAuctionDetailLookupErr(s.autoRefundIfSellerNoShipDue(ctx, auctionID)); err != nil {
 		return nil, err
 	}
 	if err := mapAuctionDetailLookupErr(s.tryFinishSellerPauseCloseIfDue(ctx, auctionID)); err != nil {
@@ -457,7 +556,6 @@ func (s auctionSvc) GetAuctionDetail(ctx context.Context, auctionID string) (*dt
 		WinnerID:            item.WinnerID,
 		Title:               item.Title,
 		Category:            item.Category,
-		Condition:           item.Condition,
 		Description:         item.Description,
 		StartPrice:          item.StartPrice,
 		CurrentBid:          item.CurrentBid,
@@ -466,28 +564,27 @@ func (s auctionSvc) GetAuctionDetail(ctx context.Context, auctionID string) (*dt
 		Status:              item.Status,
 		EndAt:               item.EndAt.Format(time.RFC3339),
 		AllowEarlyClose:     item.AllowEarlyClose,
+		AllowBidCancel:      item.AllowBidCancel,
+		AutoRenew:           item.AutoRenew,
 		ReopenEligible:      reopenEligible,
 		BuyNowPrice:         item.BuyNowPrice,
 		BiddingPausedUntil:  formatTimePtr(item.SellerClosePauseBidsUntil),
 		CoverImageURL:       item.CoverImageURL,
 		Images:              imageURLs,
 		SellerShippedAt:     formatTimePtr(item.SellerShippedAt),
+		CarrierCode:         item.CarrierCode,
+		CarrierName:         item.CarrierName,
+		TrackingNumber:      item.TrackingNumber,
+		ShipmentStatus:      item.ShipmentStatus,
 		BuyerReceivedAt:     formatTimePtr(item.BuyerReceivedAt),
 		SellerPayoutAt:      formatTimePtr(item.SellerPayoutAt),
 		PendingSellerPayout: pendingSellerPayout,
 	}
-	if pendingSellerPayout && item.SellerShippedAt != nil && s.escrowAutoConfirmDays > 0 {
-		out.EscrowAutoConfirmDays = s.escrowAutoConfirmDays
-		t := item.SellerShippedAt.AddDate(0, 0, s.escrowAutoConfirmDays)
-		out.EscrowAutoConfirmAt = t.Format(time.RFC3339)
-	}
+	out.CanConfirmReceived = shipmentCanConfirm(item.ShipmentStatus, item.SellerShippedAt != nil, item.BuyerReceivedAt != nil, pendingSellerPayout)
 	if profile, err := s.repo.GetSellerPublicProfile(ctx, item.SellerID); err == nil {
 		out.SellerDisplayName = strings.TrimSpace(profile.FirstName + " " + profile.LastName)
 		out.SellerReviewCount = profile.ReviewCount
-		if profile.ReviewCount > 0 && profile.ReviewPointsTotal > 0 {
-			avg := float64(profile.ReviewPointsTotal) / float64(profile.ReviewCount) / 2.0
-			out.SellerReviewAvgRating = math.Round(avg*10) / 10
-		}
+		out.SellerReviewAvgRating = sellerAvgRatingFromAggregate(profile.ReputationPoints, profile.ReviewCount)
 	}
 	return out, nil
 }
@@ -497,6 +594,10 @@ func formatTimePtr(t *time.Time) string {
 		return ""
 	}
 	return t.Format(time.RFC3339)
+}
+
+func shipmentCanConfirm(status string, sellerShipped bool, buyerReceived bool, pendingPayout bool) bool {
+	return pendingPayout && sellerShipped && !buyerReceived && strings.EqualFold(strings.TrimSpace(status), "delivered")
 }
 
 func (s auctionSvc) settleAuctionIfEnded(ctx context.Context, auctionID string) error {
@@ -571,6 +672,15 @@ func (s auctionSvc) settleLockedAuctionCore(ctx context.Context, tx bun.Tx, auct
 	winnerID, _, err := s.repo.SelectWinningBidHold(ctx, tx, auctionID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			if !earlyClose && lock.AutoRenew && lock.TotalBids == 0 {
+				renewed, renewErr := s.tryAutoRenewAuctionNoBids(ctx, tx, auctionID, lock)
+				if renewErr != nil {
+					return renewErr
+				}
+				if renewed {
+					return nil
+				}
+			}
 			var refundAmount int64
 			if earlyClose {
 				// Close-early with no bids: return 100% of the latest visible amount to seller.
@@ -579,14 +689,20 @@ func (s auctionSvc) settleLockedAuctionCore(ctx context.Context, tx bun.Tx, auct
 					refundAmount = lock.StartPrice
 				}
 			} else {
-				// Normal end with no bidders: refund listing deposit (start price deducted at listing in core).
-				refundAmount = lock.StartPrice
+				// Normal end with no bidders: refund listing deposit (10% of start price).
+				refundAmount = money.ListingDepositBaht(lock.StartPrice)
 			}
 			note := "คืนมัดจำประกาศ (ไม่มีผู้ประมูล)"
 			if earlyClose {
 				note = "คืนมัดจำจากการปิดประมูลก่อนเวลา (ไม่มีผู้ประมูล)"
 			}
 			if err := s.addSellerCredit(ctx, tx, lock.SellerID, auctionID, refundAmount, note); err != nil {
+				return err
+			}
+			if err := s.refundAutoRenewOptionHoldIfAny(ctx, tx, lock.SellerID, auctionID, "คืนมัดจำต่ออายุโพส (ไม่มีผู้ประมูล)"); err != nil {
+				return err
+			}
+			if err := s.refundBidCancelOptionHoldIfAny(ctx, tx, lock.SellerID, auctionID, "คืนมัดจำตัวเลือกยกเลิกบิด (ไม่มีผู้ประมูล)"); err != nil {
 				return err
 			}
 			if err := s.repo.CloseAuctionNoWinner(ctx, tx, auctionID); err != nil {
@@ -742,6 +858,9 @@ func (s auctionSvc) PlaceBid(ctx context.Context, auctionID, bidderSubject strin
 	if err := money.ValidatePositiveBaht(amount); err != nil {
 		return nil, err
 	}
+	if err := s.ensureUserCanBid(ctx, bidderSubject); err != nil {
+		return nil, err
+	}
 	if err := s.settleAuctionIfEnded(ctx, auctionID); err != nil {
 		return nil, err
 	}
@@ -787,6 +906,9 @@ func (s auctionSvc) PlaceBid(ctx context.Context, auctionID, bidderSubject strin
 	if err != nil {
 		return nil, err
 	}
+	if credit < 0 {
+		return nil, ErrCreditDebt
+	}
 	availableCredit := credit + oldHeld
 	if availableCredit < amount {
 		return nil, ErrInsufficientCredit
@@ -797,11 +919,7 @@ func (s auctionSvc) PlaceBid(ctx context.Context, auctionID, bidderSubject strin
 		return nil, err
 	}
 
-	newEndAt := a.EndAt
-	if now.After(newEndAt) {
-		newEndAt = now
-	}
-	newEndAt = newEndAt.Add(bidExtensionDuration)
+	newEndAt := extendAuctionEndAt(a.EndAt, now)
 
 	updated, err := s.repo.UpdateAuctionOnBid(ctx, tx, auctionID, bidder.UserID, amount, newEndAt)
 	if err != nil {
@@ -867,6 +985,116 @@ func (s auctionSvc) PlaceBid(ctx context.Context, auctionID, bidderSubject strin
 	return result, nil
 }
 
+func (s auctionSvc) CancelBid(ctx context.Context, auctionID, bidderSubject string) (*dto.CancelBidResult, error) {
+	if err := s.ensureUserCanBid(ctx, bidderSubject); err != nil {
+		return nil, err
+	}
+	if err := s.settleAuctionIfEnded(ctx, auctionID); err != nil {
+		return nil, err
+	}
+	if err := s.tryFinishSellerPauseCloseIfDue(ctx, auctionID); err != nil {
+		return nil, err
+	}
+	bidder, err := s.repo.FindBidderBySubject(ctx, strings.TrimSpace(bidderSubject))
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	a, err := s.repo.LockAuctionRowForUpdate(ctx, tx, auctionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("auction not found")
+		}
+		return nil, err
+	}
+	now := time.Now()
+	if a.SellerID == bidder.UserID {
+		return nil, ErrCannotBidOwn
+	}
+	if !a.AllowBidCancel {
+		return nil, ErrBidCancelNotAllowed
+	}
+	if a.Status != "active" || !a.EndAt.After(now) {
+		return nil, ErrAuctionClosed
+	}
+	if a.SellerClosePauseBidsUntil != nil && now.Before(*a.SellerClosePauseBidsUntil) {
+		return nil, ErrSellerClosingAuction
+	}
+
+	held, err := s.repo.SelectBidHoldForUpdate(ctx, tx, auctionID, bidder.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if held <= 0 {
+		return nil, ErrNoBidToCancel
+	}
+
+	refund := held / 2
+	forfeit := held - refund
+
+	credit, err := s.repo.LockUserCredit(ctx, tx, bidder.UserID)
+	if err != nil {
+		return nil, err
+	}
+	after := credit + refund
+	if err := s.repo.SetUserCredit(ctx, tx, bidder.UserID, after); err != nil {
+		return nil, err
+	}
+
+	if err := s.repo.DeleteAuctionBidLiveTx(ctx, tx, auctionID, bidder.UserID); err != nil {
+		return nil, err
+	}
+	if err := s.repo.DeleteAuctionBidParticipantTx(ctx, tx, auctionID, bidder.UserID); err != nil {
+		return nil, err
+	}
+	if err := s.repo.DeleteAuctionBidHoldTx(ctx, tx, auctionID, bidder.UserID); err != nil {
+		return nil, err
+	}
+
+	newCurrentBid, err := s.repo.RecalculateAuctionCurrentBidTx(ctx, tx, auctionID)
+	if err != nil {
+		return nil, err
+	}
+
+	newEndAt := extendAuctionEndAt(a.EndAt, now)
+	if err := s.repo.UpdateAuctionEndAtTx(ctx, tx, auctionID, newEndAt); err != nil {
+		return nil, err
+	}
+
+	if err := s.repo.InsertBidCancelRefundTx(ctx, tx, bidder.UserID, auctionID, refund, forfeit, credit, after, held); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	s.removeLiveBidderFromCache(ctx, auctionID, bidder.UserID)
+	s.broadcastAuctionState(auctionID)
+
+	return &dto.CancelBidResult{
+		AuctionID:       auctionID,
+		RefundedBaht:    refund,
+		ForfeitedBaht:   forfeit,
+		RemainingCredit: after,
+		CurrentBid:      newCurrentBid,
+		EndAt:           newEndAt.Format(time.RFC3339),
+	}, nil
+}
+
+func (s auctionSvc) removeLiveBidderFromCache(ctx context.Context, auctionID, bidderID string) {
+	if !s.liveCache.Enabled() {
+		return
+	}
+	_ = s.liveCache.RemoveBidder(ctx, auctionID, bidderID)
+}
+
 func normalizeActiveBidListScope(scope string) string {
 	switch strings.ToLower(strings.TrimSpace(scope)) {
 	case "active", "ending_soon", "outbid", "closed":
@@ -878,18 +1106,19 @@ func normalizeActiveBidListScope(scope string) string {
 
 func normalizeActiveBidListSort(sort string) string {
 	switch strings.ToLower(strings.TrimSpace(sort)) {
-	case "end", "price":
+	case "end", "price", "start", "step", "my_bid", "status":
 		return strings.ToLower(strings.TrimSpace(sort))
 	default:
 		return "latest"
 	}
 }
 
-func (s auctionSvc) MyActiveBids(ctx context.Context, userID, scope, q, sort string, limit, offset int) (*dto.MyActiveBidsResponse, error) {
+func (s auctionSvc) MyActiveBids(ctx context.Context, userID, scope, q, sort, order string, limit, offset int) (*dto.MyActiveBidsResponse, error) {
 	uid := strings.TrimSpace(userID)
 	if uid == "" {
 		return &dto.MyActiveBidsResponse{Items: []dto.MyActiveBidItem{}, Limit: limit, Offset: offset, Scope: "all"}, nil
 	}
+	s.processUserFulfillmentTimeouts(ctx, uid)
 	if limit <= 0 {
 		limit = 10
 	}
@@ -911,7 +1140,7 @@ func (s auctionSvc) MyActiveBids(ctx context.Context, userID, scope, q, sort str
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.repo.ListMyActiveBids(ctx, uid, scope, q, sort, limit, offset)
+	rows, err := s.repo.ListMyActiveBids(ctx, uid, scope, q, sort, order, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -940,7 +1169,9 @@ func (s auctionSvc) MyActiveBids(ctx context.Context, userID, scope, q, sort str
 			EndAt:              row.EndAt.Format(time.RFC3339),
 			AllowEarlyClose:    row.AllowEarlyClose,
 			CanConfirmReceived: row.CanConfirmReceived,
+			ShipmentStatus:     row.ShipmentStatus,
 			BiddingPausedUntil: pauseUntil,
+			CreatedAt:          row.CreatedAt.Format(time.RFC3339),
 		})
 	}
 	return &dto.MyActiveBidsResponse{
@@ -957,29 +1188,58 @@ func (s auctionSvc) MyActiveBids(ctx context.Context, userID, scope, q, sort str
 	}, nil
 }
 
-func (s auctionSvc) MyBidHistory(ctx context.Context, userID string, limit, offset int) (*dto.MyBidHistoryResponse, error) {
+func normalizeBidHistoryScope(scope string) string {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "active", "outbid", "won", "lost":
+		return strings.ToLower(strings.TrimSpace(scope))
+	default:
+		return "all"
+	}
+}
+
+func normalizeBidHistorySort(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "price", "my_bid", "status", "end":
+		return strings.ToLower(strings.TrimSpace(sort))
+	default:
+		return "latest"
+	}
+}
+
+func (s auctionSvc) MyBidHistory(ctx context.Context, userID, scope, q, sort, order string, limit, offset int) (*dto.MyBidHistoryResponse, error) {
 	uid := strings.TrimSpace(userID)
 	if uid == "" {
-		return &dto.MyBidHistoryResponse{Items: []dto.MyBidHistoryItem{}, Limit: limit, Offset: offset}, nil
+		return &dto.MyBidHistoryResponse{Items: []dto.MyBidHistoryItem{}, Limit: limit, Offset: offset, Scope: "all"}, nil
 	}
-	rows, err := s.repo.ListMyBidHistory(ctx, uid, limit, offset)
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	scope = normalizeBidHistoryScope(scope)
+	sort = normalizeBidHistorySort(sort)
+	q = strings.TrimSpace(q)
+
+	tabCounts, err := s.repo.CountMyBidHistoryTabs(ctx, uid, q)
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
+	scopedTotal, err := s.repo.CountMyBidHistoryScoped(ctx, uid, scope, q)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.repo.ListMyBidHistory(ctx, uid, scope, q, sort, order, limit, offset)
+	if err != nil {
+		return nil, err
+	}
 	items := make([]dto.MyBidHistoryItem, 0, len(rows))
 	for _, row := range rows {
-		st := strings.ToLower(strings.TrimSpace(row.Status))
-		isOpen := st == "active" && row.EndAt.After(now)
-		var outcome string
-		switch {
-		case isOpen && row.MyMaxBid < row.CurrentBid:
-			outcome = "outbid"
-		case isOpen:
-			outcome = "active"
-		case strings.TrimSpace(row.WinnerID) == uid:
-			outcome = "won"
-		default:
+		outcome := strings.ToLower(strings.TrimSpace(row.Outcome))
+		if outcome != "active" && outcome != "outbid" && outcome != "won" && outcome != "lost" {
 			outcome = "lost"
 		}
 		items = append(items, dto.MyBidHistoryItem{
@@ -992,77 +1252,122 @@ func (s auctionSvc) MyBidHistory(ctx context.Context, userID string, limit, offs
 			MyHighestBid:  row.MyMaxBid,
 			FinalPrice:    row.CurrentBid,
 			LastBidAt:     row.LastBidAt.Format(time.RFC3339),
+			EndAt:         row.EndAt.Format(time.RFC3339),
 		})
 	}
-	lim := limit
-	if lim <= 0 {
-		lim = 50
-	}
-	if lim > 100 {
-		lim = 100
-	}
-	off := offset
-	if off < 0 {
-		off = 0
-	}
-	return &dto.MyBidHistoryResponse{Items: items, Limit: lim, Offset: off}, nil
+	return &dto.MyBidHistoryResponse{
+		Items:       items,
+		Total:       scopedTotal,
+		AllCount:    tabCounts.All,
+		ActiveCount: tabCounts.Active,
+		OutbidCount: tabCounts.Outbid,
+		WonCount:    tabCounts.Won,
+		LostCount:   tabCounts.Lost,
+		Limit:       limit,
+		Offset:      offset,
+		Scope:       scope,
+	}, nil
 }
 
 // applySellerPayout credits the seller after escrow release (buyer confirm or auto-confirm).
-func (s auctionSvc) applySellerPayout(ctx context.Context, tx bun.Tx, sellerID, auctionID, winnerUserID string, startPrice, winnerAmount int64, earlyClose, autoRelease bool) error {
+func (s auctionSvc) applySellerPayout(ctx context.Context, tx bun.Tx, sellerID, auctionID, winnerUserID string, startPrice, winnerAmount int64, createdAt, endAt time.Time, earlyClose, autoRenew, autoRelease bool) error {
+	listingCfg := s.listingFeesConfig(ctx)
+	extraDays := extraListingDaysBeyondFree(listingCfg, createdAt, endAt)
+	durationFee := sellerListingDurationFeeBaht(listingCfg, winnerAmount, extraDays)
 	var sellerKeepPct int64
 	if earlyClose {
-		sellerKeepPct = s.platformFees.SellerKeepEarlyPct
+		sellerKeepPct = s.platformFeesConfig(ctx).SellerKeepEarlyPct
 	} else {
-		sellerKeepPct = s.platformFees.SellerKeepNormalPct
+		sellerKeepPct = s.platformFeesConfig(ctx).SellerKeepNormalPct
 	}
-	sellerProfit, platformFee := money.SplitEscrowBySellerKeepPct(winnerAmount, sellerKeepPct)
-	if platformFee > 0 {
+	sellerProfit, platformSaleFee := money.SplitEscrowBySellerKeepPct(winnerAmount, sellerKeepPct)
+	extraSellerFee := durationFee
+	if extraSellerFee > sellerProfit {
+		extraSellerFee = sellerProfit
+	}
+	sellerProfit -= extraSellerFee
+	platformFee := platformSaleFee + extraSellerFee
+	if platformFee > 0 || sellerProfit > 0 {
 		if err := s.repo.InsertPlatformSaleFee(ctx, tx, auctionID, sellerID, winnerUserID, winnerAmount, sellerProfit, platformFee, earlyClose, sellerKeepPct); err != nil {
 			return err
 		}
 	}
-	shareNote := "ส่วนแบ่งจากการประมูล (ยืนยันรับของแล้ว)"
-	refundNote := "คืนมัดจำประกาศหลังยืนยันรับของ"
+	shareNote := "ส่วนแบ่งจากการประมูล (พัสดุส่งถึงแล้ว)"
+	refundNote := "คืนมัดจำประกาศหลังพัสดุส่งถึง"
 	if autoRelease {
-		shareNote = "ส่วนแบ่งจากการประมูล (ปลด escrow อัตโนมัติหลังครบกำหนด)"
-		refundNote = "คืนมัดจำประกาศหลังปลด escrow อัตโนมัติ"
+		shareNote = "ส่วนแบ่งจากการประมูล (ระบบปลด escrow อัตโนมัติเมื่อพัสดุ delivered)"
+		refundNote = "คืนมัดจำประกาศหลังพัสดุส่งถึง"
 	}
-	if sellerProfit >= startPrice && sellerProfit > 0 {
+	if durationFee > 0 {
+		shareNote = fmt.Sprintf("%s · หักค่าประมูลเกิน %d วัน %d ฿ จากส่วนแบ่งผู้ขาย", shareNote, listingCfg.FreeListingDurationDays, durationFee)
+	}
+	if sellerProfit > 0 {
 		if err := s.addSellerLedgerCredit(ctx, tx, sellerID, auctionID, "seller_sale_share", sellerProfit, shareNote); err != nil {
 			return err
 		}
 	}
-	listingRefundCredit := startPrice
-	if sellerProfit < startPrice {
-		listingRefundCredit = sellerProfit
+	deposit, err := s.repo.GetListingDepositHoldAmountTx(ctx, tx, auctionID)
+	if err != nil {
+		return err
 	}
-	if listingRefundCredit > 0 {
-		if err := s.addSellerCredit(ctx, tx, sellerID, auctionID, listingRefundCredit, refundNote); err != nil {
+	if deposit <= 0 {
+		deposit = money.ListingDepositBaht(startPrice)
+	}
+	if deposit > 0 {
+		if err := s.addSellerCredit(ctx, tx, sellerID, auctionID, deposit, refundNote); err != nil {
 			return err
 		}
+	}
+	if err := s.consumeAutoRenewOptionHoldIfAny(ctx, tx, sellerID, auctionID, "มัดจำต่ออายุโพส — มีผู้ชนะ (เข้าแพลตฟอร์ม)"); err != nil {
+		return err
+	}
+	if err := s.consumeBidCancelOptionHoldIfAny(ctx, tx, sellerID, auctionID, "มัดจำตัวเลือกยกเลิกบิด — มีผู้ชนะ (เข้าแพลตฟอร์ม)"); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (s auctionSvc) releaseEscrowToSeller(ctx context.Context, tx bun.Tx, aid, winnerUserID string, lock repository.EscrowReleaseLock, autoRelease bool) error {
+func (s auctionSvc) tryAutoRenewAuctionNoBids(ctx context.Context, tx bun.Tx, auctionID string, lock repository.AuctionSettlementLock) (bool, error) {
+	if !lock.AutoRenew {
+		return false, nil
+	}
+	duration := lock.EndAt.Sub(lock.CreatedAt)
+	if duration < time.Minute {
+		duration = maxListingDurationFromCfg(s.listingFeesConfig(ctx))
+	}
+	newEndAt := time.Now().Add(duration)
+
+	n, err := s.repo.ApplyAuctionAutoRenewTx(ctx, tx, auctionID, lock.SellerID, newEndAt)
+	if err != nil {
+		return false, err
+	}
+	if n != 1 {
+		return false, nil
+	}
+	if err := s.repo.ClearAuctionBidsLive(ctx, tx, auctionID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s auctionSvc) releaseEscrowToSeller(ctx context.Context, tx bun.Tx, aid, winnerUserID string, lock repository.EscrowReleaseLock, autoRelease, sellerPayoutOnly bool) error {
 	winnerAmount, err := s.repo.GetWinnerEscrowHoldAmount(ctx, tx, aid, winnerUserID)
 	if err != nil {
 		return err
 	}
-	if err := s.applySellerPayout(ctx, tx, lock.SellerID, aid, winnerUserID, lock.StartPrice, winnerAmount, lock.PayoutEarlyClose, autoRelease); err != nil {
+	if err := s.applySellerPayout(ctx, tx, lock.SellerID, aid, winnerUserID, lock.StartPrice, winnerAmount, lock.CreatedAt, lock.EndAt, lock.PayoutEarlyClose, lock.AutoRenew, autoRelease); err != nil {
 		return err
 	}
 	if err := s.repo.SettleWinningBidHold(ctx, tx, aid, winnerUserID); err != nil {
 		return err
 	}
+	if sellerPayoutOnly {
+		return s.repo.MarkSellerPayoutOnly(ctx, tx, aid)
+	}
 	return s.repo.MarkAuctionDeliveryCompleted(ctx, tx, aid)
 }
 
-func (s auctionSvc) autoConfirmEscrowIfDue(ctx context.Context, auctionID string) error {
-	if s.escrowAutoConfirmDays <= 0 {
-		return nil
-	}
+func (s auctionSvc) autoReleaseEscrowIfDelivered(ctx context.Context, auctionID string) error {
 	aid := strings.TrimSpace(auctionID)
 	if aid == "" {
 		return nil
@@ -1080,17 +1385,16 @@ func (s auctionSvc) autoConfirmEscrowIfDue(ctx context.Context, auctionID string
 		}
 		return err
 	}
-	if lock.PayoutDone || !lock.SellerShipped || lock.SellerShippedAt == nil {
+	if lock.PayoutDone || !lock.SellerShipped {
 		return tx.Commit()
 	}
 	if strings.TrimSpace(lock.WinnerID) == "" {
 		return tx.Commit()
 	}
-	deadline := lock.SellerShippedAt.AddDate(0, 0, s.escrowAutoConfirmDays)
-	if time.Now().Before(deadline) {
+	if !strings.EqualFold(strings.TrimSpace(lock.ShipmentStatus), "delivered") {
 		return tx.Commit()
 	}
-	if err := s.releaseEscrowToSeller(ctx, tx, aid, lock.WinnerID, lock, true); err != nil {
+	if err := s.releaseEscrowToSeller(ctx, tx, aid, lock.WinnerID, lock, true, true); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1100,23 +1404,7 @@ func (s auctionSvc) autoConfirmEscrowIfDue(ctx context.Context, auctionID string
 	return nil
 }
 
-func (s auctionSvc) MarkSellerShipped(ctx context.Context, auctionID, sellerUserID string) error {
-	aid := strings.TrimSpace(auctionID)
-	sid := strings.TrimSpace(sellerUserID)
-	if aid == "" || sid == "" {
-		return ErrMarkShippedNotAllowed
-	}
-	n, err := s.repo.MarkSellerShipped(ctx, aid, sid)
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrMarkShippedNotAllowed
-	}
-	return nil
-}
-
-func (s auctionSvc) ConfirmBuyerReceived(ctx context.Context, auctionID, buyerUserID string, sellerRating float64) error {
+func (s auctionSvc) ConfirmBuyerReceived(ctx context.Context, auctionID, buyerUserID string, sellerRating float64, comment string) error {
 	aid := strings.TrimSpace(auctionID)
 	bid := strings.TrimSpace(buyerUserID)
 	if aid == "" || bid == "" {
@@ -1126,6 +1414,7 @@ func (s auctionSvc) ConfirmBuyerReceived(ctx context.Context, auctionID, buyerUs
 	if err != nil {
 		return err
 	}
+	comment = normalizeReviewComment(comment)
 	tx, err := s.repo.BeginTx(ctx)
 	if err != nil {
 		return err
@@ -1142,28 +1431,39 @@ func (s auctionSvc) ConfirmBuyerReceived(ctx context.Context, auctionID, buyerUs
 	if strings.TrimSpace(lock.WinnerID) != bid {
 		return ErrNotAuctionWinner
 	}
-	if lock.PayoutDone {
+	if lock.BuyerReceivedDone {
 		return tx.Commit()
 	}
 	if !lock.SellerShipped {
 		return ErrSellerMustShipFirst
+	}
+	if !strings.EqualFold(strings.TrimSpace(lock.ShipmentStatus), "delivered") {
+		return ErrShipmentNotDelivered
+	}
+	if !lock.PayoutDone {
+		if err := s.releaseEscrowToSeller(ctx, tx, aid, bid, lock, true, true); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("escrow hold not found")
+			}
+			return err
+		}
 	}
 	hasReview, err := s.repo.HasAuctionSellerReview(ctx, tx, aid)
 	if err != nil {
 		return err
 	}
 	if !hasReview {
-		if err := s.repo.InsertAuctionSellerReview(ctx, tx, aid, bid, lock.SellerID, normalizedRating, sellerPoints); err != nil {
+		if err := s.repo.InsertAuctionSellerReview(ctx, tx, aid, bid, lock.SellerID, normalizedRating, sellerPoints, comment); err != nil {
 			return err
 		}
 		if err := s.repo.AddSellerReviewAggregate(ctx, tx, lock.SellerID, sellerPoints); err != nil {
 			return err
 		}
 	}
-	if err := s.releaseEscrowToSeller(ctx, tx, aid, bid, lock, false); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("escrow hold not found")
-		}
+	if err := s.repo.MarkBuyerReceivedOnly(ctx, tx, aid); err != nil {
+		return err
+	}
+	if err := s.repo.AdjustReputationPoints(ctx, tx, bid, repository.BuyerConfirmReviewRewardPoints); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1173,9 +1473,40 @@ func (s auctionSvc) ConfirmBuyerReceived(ctx context.Context, auctionID, buyerUs
 	return nil
 }
 
+func (s auctionSvc) ensureUserCanBid(ctx context.Context, subject string) error {
+	if s.userSuspension == nil {
+		return nil
+	}
+	banned, err := s.userSuspension.IsUserBanned(ctx, subject)
+	if err != nil {
+		return err
+	}
+	if banned {
+		return ErrBidBanned
+	}
+	return nil
+}
+
+func (s auctionSvc) ensureSellerCanPost(ctx context.Context, sellerID string) error {
+	if s.userSuspension == nil {
+		return nil
+	}
+	banned, err := s.userSuspension.IsUserPostingBanned(ctx, sellerID)
+	if err != nil {
+		return err
+	}
+	if banned {
+		return ErrPostingBanned
+	}
+	return nil
+}
+
 func (s auctionSvc) CreateSellerAuction(ctx context.Context, sellerID string, req dto.CreateAuctionRequest, imagePaths []string) (*dto.CreateAuctionResponse, error) {
 	if strings.TrimSpace(sellerID) == "" {
 		return nil, fmt.Errorf("missing seller id")
+	}
+	if err := s.ensureSellerCanPost(ctx, sellerID); err != nil {
+		return nil, err
 	}
 	titleTrim := strings.TrimSpace(req.Title)
 	if titleTrim == "" {
@@ -1184,12 +1515,9 @@ func (s auctionSvc) CreateSellerAuction(ctx context.Context, sellerID string, re
 	if utf8.RuneCountInString(titleTrim) > maxTitleRunes {
 		return nil, fmt.Errorf("title too long")
 	}
-	categoryJoined, err := normalizeSellerCategories(req.Category)
+	categoryJoined, err := s.normalizeSellerCategories(ctx, req.Category)
 	if err != nil {
 		return nil, err
-	}
-	if utf8.RuneCountInString(strings.TrimSpace(req.Condition)) > maxConditionRunes {
-		return nil, fmt.Errorf("condition too long")
 	}
 	if utf8.RuneCountInString(req.Description) > maxDescriptionRunes {
 		return nil, fmt.Errorf("description too long")
@@ -1200,7 +1528,8 @@ func (s auctionSvc) CreateSellerAuction(ctx context.Context, sellerID string, re
 	if err := money.ValidatePositiveBaht(req.BidStep); err != nil {
 		return nil, fmt.Errorf("invalid bid_step: %w", err)
 	}
-	if req.StartPrice < 100 {
+	listingCfg := s.listingFeesConfig(ctx)
+	if req.StartPrice < listingCfg.MinStartPriceTHB {
 		return nil, fmt.Errorf("invalid price settings")
 	}
 	if req.BuyNowPrice < 0 {
@@ -1225,20 +1554,48 @@ func (s auctionSvc) CreateSellerAuction(ctx context.Context, sellerID string, re
 	if !endAt.After(time.Now()) {
 		return nil, fmt.Errorf("end_at must be in the future")
 	}
+	if err := validateAuctionEndAt(endAt); err != nil {
+		return nil, err
+	}
 	auctionID := generateSellerAuctionID()
+	listingDeposit := money.ListingDepositBaht(req.StartPrice)
 
 	tx, err := s.repo.BeginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ok, balBefore, balAfter, err := s.userCredit.DeductListingDepositTx(ctx, tx, sellerID, req.StartPrice)
+	ok, balBefore, balAfter, err := s.userCredit.DeductListingDepositTx(ctx, tx, sellerID, listingDeposit)
 	if err != nil {
 		_ = tx.Rollback()
 		return nil, err
 	}
 	if !ok {
 		_ = tx.Rollback()
-		return nil, fmt.Errorf("insufficient credit for start price (%d THB required)", req.StartPrice)
+		msg := fmt.Sprintf("insufficient credit for listing deposit (%d THB required, 10%% of start price)", listingDeposit)
+		if req.AllowBidCancel {
+			msg = fmt.Sprintf("insufficient credit (%d THB deposit + %d THB bid-cancel option required)", listingDeposit, listingCfg.BidCancelOptionFeeTHB)
+		}
+		if req.AutoRenew {
+			msg = fmt.Sprintf("insufficient credit (%d THB deposit + %d THB auto-renew option required)", listingDeposit, listingCfg.AutoRenewOptionFeeTHB)
+			if req.AllowBidCancel {
+				msg = fmt.Sprintf("insufficient credit (%d THB deposit + %d THB bid-cancel + %d THB auto-renew required)", listingDeposit, listingCfg.BidCancelOptionFeeTHB, listingCfg.AutoRenewOptionFeeTHB)
+			}
+		}
+		return nil, errors.New(msg)
+	}
+
+	var bidCancelFeeBefore, bidCancelFeeAfter int64
+	if req.AllowBidCancel {
+		okFee, feeBefore, feeAfter, err := s.userCredit.DeductListingDepositTx(ctx, tx, sellerID, listingCfg.BidCancelOptionFeeTHB)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		if !okFee {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("insufficient credit for bid-cancel option (%d THB required)", listingCfg.BidCancelOptionFeeTHB)
+		}
+		bidCancelFeeBefore, bidCancelFeeAfter = feeBefore, feeAfter
 	}
 
 	mainAuction := entity.Auction{
@@ -1246,7 +1603,6 @@ func (s auctionSvc) CreateSellerAuction(ctx context.Context, sellerID string, re
 		SellerID:             sellerID,
 		Title:                titleTrim,
 		Category:             categoryJoined,
-		Condition:            strings.TrimSpace(req.Condition),
 		Description:          strings.TrimSpace(req.Description),
 		StartPrice:           req.StartPrice,
 		BidStep:              req.BidStep,
@@ -1255,6 +1611,8 @@ func (s auctionSvc) CreateSellerAuction(ctx context.Context, sellerID string, re
 		Status:               "active",
 		EndAt:                endAt,
 		AllowEarlyClose:      req.AllowEarlyClose,
+		AllowBidCancel:       req.AllowBidCancel,
+		AutoRenew:            req.AutoRenew,
 		EarlyCloseHoldAmount: 0,
 		BuyNowPrice:          req.BuyNowPrice,
 		CoverImageURL:        imagePaths[0],
@@ -1277,9 +1635,34 @@ func (s auctionSvc) CreateSellerAuction(ctx context.Context, sellerID string, re
 		return nil, err
 	}
 
-	if err := s.repo.InsertListingDepositHoldTx(ctx, tx, sellerID, auctionID, req.StartPrice, balBefore, balAfter, "หักมัดจำประกาศเมื่อสร้างประมูล"); err != nil {
+	if err := s.repo.InsertListingDepositHoldTx(ctx, tx, sellerID, auctionID, listingDeposit, balBefore, balAfter, "หักมัดจำประกาศ 10% เมื่อสร้างประมูล"); err != nil {
 		_ = tx.Rollback()
 		return nil, err
+	}
+
+	if req.AllowBidCancel {
+		bidCancelFee := listingCfg.BidCancelOptionFeeTHB
+		if err := s.repo.InsertBidCancelOptionHoldTx(ctx, tx, sellerID, auctionID, bidCancelFee, bidCancelFeeBefore, bidCancelFeeAfter); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+	}
+
+	if req.AutoRenew {
+		autoRenewFee := listingCfg.AutoRenewOptionFeeTHB
+		okRenew, renewBefore, renewAfter, err := s.userCredit.DeductListingDepositTx(ctx, tx, sellerID, autoRenewFee)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		if !okRenew {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("insufficient credit for auto-renew option (%d THB required)", autoRenewFee)
+		}
+		if err := s.repo.InsertAutoRenewOptionHoldTx(ctx, tx, sellerID, auctionID, autoRenewFee, renewBefore, renewAfter); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1299,14 +1682,14 @@ func normalizeSellerListScope(s string) string {
 
 func normalizeSellerListSort(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "end", "price":
+	case "end", "price", "start", "step", "bidders", "status":
 		return strings.ToLower(strings.TrimSpace(s))
 	default:
 		return "latest"
 	}
 }
 
-func (s auctionSvc) ListSellerAuctions(ctx context.Context, sellerID, scope, q, sort string, limit, offset int) (*dto.SellerAuctionListResponse, error) {
+func (s auctionSvc) ListSellerAuctions(ctx context.Context, sellerID, scope, q, sort, order string, limit, offset int) (*dto.SellerAuctionListResponse, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -1331,15 +1714,7 @@ func (s auctionSvc) ListSellerAuctions(ctx context.Context, sellerID, scope, q, 
 	if err != nil {
 		return nil, err
 	}
-	items, err := s.repo.ListAuctionsBySellerID(ctx, sellerID, scope, q, sort, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	auctionIDs := make([]string, 0, len(items))
-	for _, item := range items {
-		auctionIDs = append(auctionIDs, item.AuctionID)
-	}
-	reviewsByAuction, err := s.repo.ListSellerReviewsForAuctions(ctx, sellerID, auctionIDs)
+	items, err := s.repo.ListAuctionsBySellerID(ctx, sellerID, scope, q, sort, order, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1381,14 +1756,13 @@ func (s auctionSvc) ListSellerAuctions(ctx context.Context, sellerID, scope, q, 
 			CoverImageURL:       item.CoverImageURL,
 			BuyNowPrice:         item.BuyNowPrice,
 			AllowEarlyClose:     item.AllowEarlyClose,
+			AllowBidCancel:      item.AllowBidCancel,
+			AutoRenew:           item.AutoRenew,
 			ReopenEligible:      reopenEligible,
 			PendingSellerPayout: pendingSellerPayout,
 			SellerShippedAt:     shippedAt,
 			BiddingPausedUntil:  biddingPause,
-		}
-		if rev, ok := reviewsByAuction[item.AuctionID]; ok {
-			row.BuyerRating = rev.Rating
-			row.BuyerReviewPoints = rev.SellerPoints
+			CreatedAt:           item.CreatedAt.Format(time.RFC3339),
 		}
 		if wid := strings.TrimSpace(item.WinnerID); wid != "" {
 			row.WinnerID = wid
@@ -1416,12 +1790,18 @@ func (s auctionSvc) ReopenSellerAuctionNoBids(ctx context.Context, sellerID, auc
 	if strings.TrimSpace(sellerID) == "" || strings.TrimSpace(auctionID) == "" {
 		return fmt.Errorf("missing seller or auction id")
 	}
+	if err := s.ensureSellerCanPost(ctx, sellerID); err != nil {
+		return err
+	}
 	endAt, err := time.Parse(time.RFC3339, strings.TrimSpace(endAtRFC3339))
 	if err != nil {
 		return fmt.Errorf("invalid end_at")
 	}
 	if !endAt.After(time.Now()) {
 		return fmt.Errorf("end_at must be in the future")
+	}
+	if err := validateAuctionEndAt(endAt); err != nil {
+		return err
 	}
 
 	tx, err := s.repo.BeginTx(ctx)
@@ -1455,12 +1835,13 @@ func (s auctionSvc) ReopenSellerAuctionNoBids(ctx context.Context, sellerID, auc
 		return ErrAuctionReopenNotAllowed
 	}
 
-	ok, balBefore, balAfter, err := s.userCredit.DeductListingDepositTx(ctx, tx, sellerID, a.StartPrice)
+	listingDeposit := money.ListingDepositBaht(a.StartPrice)
+	ok, balBefore, balAfter, err := s.userCredit.DeductListingDepositTx(ctx, tx, sellerID, listingDeposit)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("insufficient credit for start price (%d THB required)", a.StartPrice)
+		return fmt.Errorf("insufficient credit for listing deposit (%d THB required, 10%% of start price)", listingDeposit)
 	}
 
 	n, err := s.repo.ApplyAuctionReopenTx(ctx, tx, auctionID, sellerID, endAt)
@@ -1470,7 +1851,7 @@ func (s auctionSvc) ReopenSellerAuctionNoBids(ctx context.Context, sellerID, auc
 	if n != 1 {
 		return ErrAuctionReopenNotAllowed
 	}
-	if err := s.repo.InsertListingDepositHoldTx(ctx, tx, sellerID, auctionID, a.StartPrice, balBefore, balAfter, "หักมัดจำประกาศเมื่อเปิดประมูลรอบใหม่"); err != nil {
+	if err := s.repo.InsertListingDepositHoldTx(ctx, tx, sellerID, auctionID, listingDeposit, balBefore, balAfter, "หักมัดจำประกาศ 10% เมื่อเปิดประมูลรอบใหม่"); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1519,7 +1900,80 @@ func (s auctionSvc) DeleteSellerAuctionClosedNoBids(ctx context.Context, sellerI
 	if n != 1 {
 		return ErrAuctionDeleteNotAllowed
 	}
+	if err := s.refundAutoRenewOptionHoldIfAny(ctx, tx, sellerID, auctionID, "คืนมัดจำต่ออายุโพส (ลบรายการไม่มีผู้บิด)"); err != nil {
+		return err
+	}
+	if err := s.refundBidCancelOptionHoldIfAny(ctx, tx, sellerID, auctionID, "คืนมัดจำตัวเลือกยกเลิกบิด (ลบรายการไม่มีผู้บิด)"); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func (s auctionSvc) ListProductCategories(ctx context.Context) ([]string, error) {
+	return s.repo.ListActiveProductCategoryNames(ctx)
+}
+
+func (s auctionSvc) ReportAuction(ctx context.Context, auctionID, reporterUserID, reason string) (*dto.ReportAuctionResponse, error) {
+	auctionID = strings.TrimSpace(auctionID)
+	reporterUserID = strings.TrimSpace(reporterUserID)
+	reason = strings.TrimSpace(reason)
+	if auctionID == "" || reporterUserID == "" {
+		return nil, fmt.Errorf("invalid request")
+	}
+	if utf8.RuneCountInString(reason) > 2000 {
+		return nil, fmt.Errorf("reason too long")
+	}
+
+	seller, err := s.repo.GetAuctionSellerForReport(ctx, auctionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("auction not found")
+		}
+		return nil, err
+	}
+	if seller.SellerID == reporterUserID {
+		return nil, ErrCannotReportOwn
+	}
+
+	dup, err := s.repo.HasPendingAuctionReport(ctx, auctionID, reporterUserID)
+	if err != nil {
+		return nil, err
+	}
+	if dup {
+		return nil, repository.ErrReportDuplicatePending
+	}
+
+	reportID, err := s.repo.InsertAuctionReport(ctx, auctionID, seller.SellerID, reporterUserID, reason)
+	if err != nil {
+		return nil, err
+	}
+	return &dto.ReportAuctionResponse{
+		ReportID: reportID,
+		Message:  "ส่งเรื่องร้องเรียนแล้ว ทีมงานจะตรวจสอบ",
+	}, nil
+}
+
+func (s auctionSvc) listingFeesConfig(ctx context.Context) config.ListingFeesConfig {
+	return s.policy.Get(ctx).Listing
+}
+
+func (s auctionSvc) platformFeesConfig(ctx context.Context) config.PlatformFeesConfig {
+	return s.policy.Get(ctx).PlatformFees
+}
+
+func (s auctionSvc) fulfillmentConfig(ctx context.Context) config.FulfillmentConfig {
+	return s.policy.Get(ctx).Fulfillment
+}
+
+func (s auctionSvc) ListingFees(ctx context.Context) dto.ListingFeesResponse {
+	cfg := s.listingFeesConfig(ctx)
+	return dto.ListingFeesResponse{
+		MinStartPriceTHB:        cfg.MinStartPriceTHB,
+		BidCancelOptionFeeTHB:   cfg.BidCancelOptionFeeTHB,
+		FreeListingDurationDays: cfg.FreeListingDurationDays,
+		ExtraListingDayFeePct:   cfg.ExtraListingDayFeePct,
+		AutoRenewOptionFeeTHB:   cfg.AutoRenewOptionFeeTHB,
+	}
 }
 
 func generateSellerAuctionID() string {

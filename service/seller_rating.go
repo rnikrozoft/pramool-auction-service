@@ -3,9 +3,28 @@ package service
 import (
 	"errors"
 	"math"
+	"strings"
+	"unicode/utf8"
 )
 
+const maxReviewCommentRunes = 500
+
+var ErrReviewCommentTooLong = errors.New("review comment too long")
+
 var ErrInvalidSellerRating = errors.New("invalid seller rating")
+
+// normalizeReviewComment trims and caps buyer review text (optional).
+func normalizeReviewComment(comment string) string {
+	comment = strings.TrimSpace(comment)
+	if comment == "" {
+		return ""
+	}
+	if utf8.RuneCountInString(comment) <= maxReviewCommentRunes {
+		return comment
+	}
+	runes := []rune(comment)
+	return strings.TrimSpace(string(runes[:maxReviewCommentRunes]))
+}
 
 // SellerPointsFromRating validates half-star rating (0.5–5.0) and returns seller points (rating × 2).
 // Example: 1.0 stars → 2 points, 4.5 stars → 9 points.

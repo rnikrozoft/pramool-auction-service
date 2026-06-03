@@ -17,9 +17,9 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/rnikrozoft/pramool-auction-service/handler"
 	"github.com/rnikrozoft/pramool-auction-service/internal/auctionlive"
-	"github.com/rnikrozoft/pramool-auction-service/internal/config"
 	"github.com/rnikrozoft/pramool-auction-service/internal/telemetry"
 	"github.com/rnikrozoft/pramool-auction-service/middleware"
+	"github.com/rnikrozoft/pramool-auction-service/model/dto"
 	"github.com/rnikrozoft/pramool-auction-service/repository"
 	"github.com/rnikrozoft/pramool-auction-service/service"
 	"github.com/uptrace/bun"
@@ -91,30 +91,67 @@ func main() {
 	}
 	defer func() { _ = auctionlive.Close(liveCache) }()
 
-	platformFees := config.LoadPlatformFeesFromEnv()
+	wsFanout, err := auctionlive.NewWSFanoutFromURL(auctionlive.RedisURLFromEnv())
+	if err != nil {
+		logger.Warn("redis ws fanout disabled", zap.Error(err))
+		wsFanout = auctionlive.LocalWSFanout()
+	} else if wsFanout.Enabled() {
+		logger.Info("redis ws fanout enabled")
+	}
+	defer func() { _ = auctionlive.CloseWSFanout(wsFanout) }()
+
+	wsFanoutCtx, wsFanoutCancel := context.WithCancel(context.Background())
+	defer wsFanoutCancel()
+	go func() {
+		if err := wsFanout.Run(wsFanoutCtx, func(auctionID string, msg dto.AuctionWSMessage) {
+			hub.Broadcast(auctionID, msg)
+		}); err != nil && err != context.Canceled {
+			logger.Warn("ws fanout stopped", zap.Error(err))
+		}
+	}()
+
+	platformSettingsRepo := repository.NewPlatformSettingsRepository(db)
+	policyLoader, err := service.NewPlatformPolicyLoader(context.Background(), platformSettingsRepo)
+	if err != nil {
+		logger.Fatal("platform_settings", zap.Error(err))
+	}
+	userSuspension := repository.NewUserSuspensionRepository(db)
 	auctionSvc := service.NewAuctionService(
 		auctionRepo,
 		userCreditRepo,
+		userSuspension,
 		hub,
-		strings.TrimSpace(os.Getenv("ESCROW_AUTO_CONFIRM_DAYS")),
 		liveCache,
-		platformFees,
+		policyLoader,
 	)
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			auctionSvc.SweepFulfillmentTimeouts(ctx)
+			cancel()
+		}
+	}()
 	auctionHandler := handler.NewAuctionHandler(auctionSvc)
-	rt := handler.NewRealtimeHandler(hub, auctionSvc)
+	rt := handler.NewRealtimeHandler(hub, auctionSvc, wsFanout)
 	m := middleware.Middleware{JWTSecret: jwtSecret}
 
 	app.Static("/uploads", "./uploads")
 
+	app.Get("/categories", auctionHandler.ListProductCategories)
+	app.Get("/listing-fees", auctionHandler.ListingFees)
 	app.Get("/auctions", auctionHandler.ListAuctions)
 	app.Get("/auctions/presence", rt.AuctionPresence)
 	app.Get("/auctions/:id/bidders", auctionHandler.ListAuctionBidders)
 	app.Get("/auctions/:id", auctionHandler.AuctionDetail)
+	app.Get("/public/users/:id/closed-auctions", auctionHandler.PublicUserClosedAuctions)
 	app.Get("/public/users/:id", auctionHandler.PublicUserProfile)
 	app.Get("/my/active-bids", m.JWTMiddleware, auctionHandler.MyActiveBids)
 	app.Get("/my/bid-history", m.JWTMiddleware, auctionHandler.MyBidHistory)
-	app.Post("/auctions/:id/mark-shipped", m.JWTMiddleware, auctionHandler.MarkSellerShipped)
 	app.Post("/auctions/:id/confirm-received", m.JWTMiddleware, auctionHandler.ConfirmBuyerReceived)
+	app.Post("/auctions/:id/cancel-bid", m.JWTMiddleware, auctionHandler.CancelBid)
+	app.Post("/auctions/:id/report", m.JWTMiddleware, auctionHandler.ReportAuction)
 	app.Post("/auctions/:id/close-early", m.JWTMiddleware, auctionHandler.CloseEarly)
 
 	app.Post("/seller/auctions", m.JWTMiddleware, auctionHandler.CreateSellerAuction)

@@ -29,33 +29,18 @@ func sellerAuctionSearchSQL(q string) (clause string, args []interface{}) {
 	return ` AND (title ILIKE ? OR auction_id ILIKE ?)`, []interface{}{pattern, pattern}
 }
 
-func sellerAuctionSortSQL(sort string) string {
-	switch strings.ToLower(strings.TrimSpace(sort)) {
-	case "price":
-		return "current_bid DESC, created_at DESC, auction_id DESC"
-	case "end":
-		return `(CASE WHEN status = 'active' AND end_at > NOW() THEN 0 ELSE 1 END) ASC,
-			(CASE WHEN status = 'active' AND end_at > NOW() THEN end_at END) ASC NULLS LAST,
-			end_at DESC NULLS LAST,
-			auction_id DESC`
-	default:
-		return "created_at DESC, auction_id DESC"
-	}
-}
-
 func (r auctionRepo) CreateAuctionWithTx(ctx context.Context, tx bun.Tx, auction entity.Auction) error {
 	query := `
 	INSERT INTO auctions (
-		auction_id, seller_id, title, category, item_condition, description,
-		start_price, bid_step, current_bid, total_bids, status, end_at, allow_early_close, early_close_hold_amount, buy_now_price, cover_image_url
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		auction_id, seller_id, title, category, description,
+		start_price, bid_step, current_bid, total_bids, status, end_at, allow_early_close, allow_bid_cancel, auto_renew, early_close_hold_amount, buy_now_price, cover_image_url
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	_, err := tx.NewRaw(query,
 		auction.AuctionID,
 		auction.SellerID,
 		auction.Title,
 		auction.Category,
-		auction.Condition,
 		auction.Description,
 		auction.StartPrice,
 		auction.BidStep,
@@ -64,6 +49,8 @@ func (r auctionRepo) CreateAuctionWithTx(ctx context.Context, tx bun.Tx, auction
 		auction.Status,
 		auction.EndAt,
 		auction.AllowEarlyClose,
+		auction.AllowBidCancel,
+		auction.AutoRenew,
 		auction.EarlyCloseHoldAmount,
 		auction.BuyNowPrice,
 		auction.CoverImageURL,
@@ -84,6 +71,28 @@ func (r auctionRepo) InsertListingDepositHoldTx(ctx context.Context, tx bun.Tx, 
 	return err
 }
 
+func (r auctionRepo) GetListingDepositHoldAmountTx(ctx context.Context, tx bun.Tx, auctionID string) (int64, error) {
+	var amt int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(bid_amount), 0)::bigint
+		FROM bid_transactions
+		WHERE auction_id = ? AND tx_type = 'listing_deposit_hold'
+	`, auctionID).Scan(&amt)
+	return amt, err
+}
+
+func (r auctionRepo) InsertListingDepositForfeitTx(ctx context.Context, tx bun.Tx, sellerID, auctionID string, forfeitAmount int64, note string) error {
+	if forfeitAmount <= 0 {
+		return nil
+	}
+	query := `
+		INSERT INTO bid_transactions (user_id, auction_id, tx_type, amount, balance_before, balance_after, note, bid_amount)
+		VALUES (?, ?, 'listing_deposit_forfeit', 0, 0, 0, ?, ?)
+	`
+	_, err := tx.NewRaw(query, sellerID, auctionID, note, forfeitAmount).Exec(ctx)
+	return err
+}
+
 func (r auctionRepo) CreateAuctionImagesWithTx(ctx context.Context, tx bun.Tx, images []entity.AuctionImage) error {
 	query := `INSERT INTO auction_images (auction_id, image_url, sort_order) VALUES (?, ?, ?)`
 	for _, img := range images {
@@ -94,14 +103,15 @@ func (r auctionRepo) CreateAuctionImagesWithTx(ctx context.Context, tx bun.Tx, i
 	return nil
 }
 
-func (r auctionRepo) ListAuctionsBySellerID(ctx context.Context, sellerID, scope, q, sort string, limit, offset int) ([]entity.Auction, error) {
+func (r auctionRepo) ListAuctionsBySellerID(ctx context.Context, sellerID, scope, q, sort, order string, limit, offset int) ([]entity.Auction, error) {
 	items := make([]entity.Auction, 0)
 	extra := sellerAuctionScopeSQL(scope)
 	searchClause, searchArgs := sellerAuctionSearchSQL(q)
-	orderBy := sellerAuctionSortSQL(sort)
+	orderBy := sellerAuctionSortSQL(sort, order)
 	query := `
-	SELECT auction_id, seller_id, title, category, item_condition AS condition, description,
+	SELECT auction_id, seller_id, title, category, description,
 		start_price, bid_step, current_bid, total_bids, status, end_at, COALESCE(allow_early_close, FALSE) AS allow_early_close,
+		COALESCE(allow_bid_cancel, FALSE) AS allow_bid_cancel,
 		COALESCE(buy_now_price, 0) AS buy_now_price, cover_image_url,
 		COALESCE(NULLIF(TRIM(BOTH FROM COALESCE(winner_id::text, '')), ''), '') AS winner_id,
 		seller_shipped_at,
@@ -158,12 +168,12 @@ func (r auctionRepo) CountAuctionsBySellerIDScoped(ctx context.Context, sellerID
 func (r auctionRepo) LockAuctionBySellerForUpdate(ctx context.Context, tx bun.Tx, auctionID, sellerID string) (*entity.Auction, error) {
 	item := new(entity.Auction)
 	err := tx.NewRaw(`
-		SELECT auction_id, seller_id, title, category, item_condition AS condition, description,
+		SELECT auction_id, seller_id, title, category, description,
 			start_price, bid_step, current_bid, total_bids, status, end_at,
 			COALESCE(allow_early_close, FALSE) AS allow_early_close,
 			COALESCE(early_close_hold_amount, 0) AS early_close_hold_amount,
 			cover_image_url,
-			created_at, updated_at, COALESCE(winner_id, '') AS winner_id
+			created_at, updated_at, COALESCE(winner_id::text, '') AS winner_id
 		FROM auctions
 		WHERE auction_id = ? AND seller_id = ?
 		FOR UPDATE
@@ -193,8 +203,31 @@ func (r auctionRepo) DeleteClosedAuctionNoBidsTx(ctx context.Context, tx bun.Tx,
 		  AND seller_id = ?
 		  AND status = 'closed'
 		  AND total_bids = 0
-		  AND (winner_id IS NULL OR TRIM(winner_id) = '')
+		  AND winner_id IS NULL
 	`, auctionID, sellerID).Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (r auctionRepo) ApplyAuctionAutoRenewTx(ctx context.Context, tx bun.Tx, auctionID, sellerID string, endAt time.Time) (int64, error) {
+	res, err := tx.NewRaw(`
+		UPDATE auctions SET
+			status = 'active',
+			current_bid = start_price,
+			total_bids = 0,
+			end_at = ?,
+			winner_id = NULL,
+			settled_at = NULL,
+			early_close_hold_amount = 0,
+			seller_close_pause_bids_until = NULL,
+			auto_renew_count = COALESCE(auto_renew_count, 0) + 1,
+			updated_at = NOW()
+		WHERE auction_id = ? AND seller_id = ?
+		  AND status = 'active'
+		  AND COALESCE(auto_renew, FALSE) = TRUE
+	`, endAt, auctionID, sellerID).Exec(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -212,11 +245,12 @@ func (r auctionRepo) ApplyAuctionReopenTx(ctx context.Context, tx bun.Tx, auctio
 			settled_at = NULL,
 			early_close_hold_amount = 0,
 			seller_close_pause_bids_until = NULL,
+			created_at = NOW(),
 			updated_at = NOW()
 		WHERE auction_id = ? AND seller_id = ?
 		  AND status = 'closed'
 		  AND total_bids = 0
-		  AND (winner_id IS NULL OR winner_id = '')
+		  AND winner_id IS NULL
 	`, endAt, auctionID, sellerID).Exec(ctx)
 	if err != nil {
 		return 0, err

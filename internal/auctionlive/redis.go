@@ -134,6 +134,17 @@ func (c redisCache) ListBidders(ctx context.Context, auctionID string, limit int
 	return out, nil
 }
 
+func (c redisCache) RemoveBidder(ctx context.Context, auctionID, bidderUserID string) error {
+	if strings.TrimSpace(auctionID) == "" || strings.TrimSpace(bidderUserID) == "" {
+		return nil
+	}
+	pipe := c.client.Pipeline()
+	pipe.ZRem(ctx, c.rankKey(auctionID), bidderUserID)
+	pipe.HDel(ctx, c.metaKey(auctionID), bidderUserID)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
 func (c redisCache) ClearAuction(ctx context.Context, auctionID string) error {
 	if strings.TrimSpace(auctionID) == "" {
 		return nil

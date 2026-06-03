@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -10,8 +11,13 @@ import (
 
 const tokenUseRefresh = "refresh"
 
+type UserSuspensionChecker interface {
+	IsUserSuspended(ctx context.Context, subject string) (bool, error)
+}
+
 type Middleware struct {
-	JWTSecret string
+	JWTSecret         string
+	SuspensionChecker UserSuspensionChecker
 }
 
 // JWTMiddleware matches pramool-core: CustomClaims user_id, then JWT sub fallback.

@@ -20,6 +20,7 @@ type Cache interface {
 	UpsertBidder(ctx context.Context, auctionID string, auctionEndAt time.Time, entry BidderEntry) error
 	ListBidders(ctx context.Context, auctionID string, limit int) ([]BidderEntry, error)
 	ClearAuction(ctx context.Context, auctionID string) error
+	RemoveBidder(ctx context.Context, auctionID, bidderUserID string) error
 }
 
 type noopCache struct{}
@@ -35,6 +36,8 @@ func (noopCache) ListBidders(context.Context, string, int) ([]BidderEntry, error
 }
 
 func (noopCache) ClearAuction(context.Context, string) error { return nil }
+
+func (noopCache) RemoveBidder(context.Context, string, string) error { return nil }
 
 // Noop returns a disabled cache (Postgres-only live bidders).
 func Noop() Cache { return noopCache{} }

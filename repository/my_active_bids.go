@@ -20,7 +20,9 @@ type MyActiveBidRow struct {
 	LeadingUserID             string
 	AllowEarlyClose           bool
 	CanConfirmReceived        bool
+	ShipmentStatus            string
 	SellerClosePauseBidsUntil *time.Time
+	CreatedAt                 time.Time
 }
 
 // MyActiveBidTabCounts are badge counts for the buyer active-bids dashboard.
@@ -45,7 +47,7 @@ func myActiveBidsUnionSQL() string {
 			a.end_at,
 			h.held_amount,
 			COALESCE((
-				SELECT h2.user_id
+				SELECT h2.user_id::text
 				FROM auction_bid_holds h2
 				WHERE h2.auction_id = a.auction_id AND h2.hold_status = 'held'
 				ORDER BY h2.held_amount DESC, h2.created_at ASC, h2.user_id ASC
@@ -53,7 +55,9 @@ func myActiveBidsUnionSQL() string {
 			), '') AS leading_user_id,
 			COALESCE(a.allow_early_close, FALSE) AS allow_early_close,
 			FALSE AS can_confirm_received,
-			a.seller_close_pause_bids_until AS seller_close_pause_bids_until
+			'pending' AS shipment_status,
+			a.seller_close_pause_bids_until AS seller_close_pause_bids_until,
+			a.created_at
 		FROM auction_bid_holds h
 		INNER JOIN auctions a ON a.auction_id = h.auction_id
 		WHERE h.user_id = ?
@@ -74,16 +78,18 @@ func myActiveBidsUnionSQL() string {
 			a.bid_step,
 			a.end_at,
 			a.current_bid AS held_amount,
-			COALESCE(NULLIF(TRIM(BOTH FROM COALESCE(a.winner_id::text, '')), ''), '') AS leading_user_id,
+			COALESCE(a.winner_id::text, '') AS leading_user_id,
 			COALESCE(a.allow_early_close, FALSE) AS allow_early_close,
-			TRUE AS can_confirm_received,
-			NULL::timestamptz AS seller_close_pause_bids_until
+			(a.shipment_status = 'delivered') AS can_confirm_received,
+			COALESCE(a.shipment_status, 'pending') AS shipment_status,
+			NULL::timestamptz AS seller_close_pause_bids_until,
+			a.created_at
 		FROM auctions a
 		WHERE a.status = 'closed'
-		  AND NULLIF(TRIM(BOTH FROM COALESCE(a.winner_id::text, '')), '') = ?
-		  AND a.seller_payout_at IS NULL
-		  AND a.seller_shipped_at IS NOT NULL
+		  AND a.winner_id IS NOT NULL
+		  AND a.winner_id = ?
 		  AND a.buyer_received_at IS NULL
+		  AND a.buyer_escrow_refunded_at IS NULL
 	`
 }
 
@@ -111,24 +117,10 @@ func activeBidSearchSQL(q string) (clause string, args []interface{}) {
 	return ` AND (u.title ILIKE ? OR u.auction_id ILIKE ?)`, []interface{}{pattern, pattern}
 }
 
-func activeBidSortSQL(sort string) string {
-	switch strings.ToLower(strings.TrimSpace(sort)) {
-	case "price":
-		return "u.current_bid DESC, u.auction_id DESC"
-	case "end":
-		return `(u.end_at > NOW()) DESC,
-			(CASE WHEN u.end_at > NOW() THEN u.end_at END) ASC NULLS LAST,
-			u.end_at DESC NULLS LAST,
-			u.auction_id DESC`
-	default:
-		return "u.auction_id DESC"
-	}
-}
-
-func (r auctionRepo) ListMyActiveBids(ctx context.Context, userID, scope, q, sort string, limit, offset int) ([]MyActiveBidRow, error) {
+func (r auctionRepo) ListMyActiveBids(ctx context.Context, userID, scope, q, sort, order string, limit, offset int) ([]MyActiveBidRow, error) {
 	scopeClause := activeBidScopeSQL(scope, userID)
 	searchClause, searchArgs := activeBidSearchSQL(q)
-	orderBy := activeBidSortSQL(sort)
+	orderBy := activeBidSortSQL(sort, order, userID)
 	query := `
 		SELECT
 			u.auction_id,
@@ -143,7 +135,9 @@ func (r auctionRepo) ListMyActiveBids(ctx context.Context, userID, scope, q, sor
 			u.leading_user_id,
 			u.allow_early_close,
 			u.can_confirm_received,
-			u.seller_close_pause_bids_until
+			u.shipment_status,
+			u.seller_close_pause_bids_until,
+			u.created_at
 		FROM (` + myActiveBidsUnionSQL() + `) AS u
 		WHERE 1=1` + scopeClause + searchClause + `
 		ORDER BY ` + orderBy + `
@@ -178,7 +172,9 @@ func (r auctionRepo) ListMyActiveBids(ctx context.Context, userID, scope, q, sor
 			&row.LeadingUserID,
 			&row.AllowEarlyClose,
 			&row.CanConfirmReceived,
+			&row.ShipmentStatus,
 			&row.SellerClosePauseBidsUntil,
+			&row.CreatedAt,
 		); err != nil {
 			return nil, err
 		}

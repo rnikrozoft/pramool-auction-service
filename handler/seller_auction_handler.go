@@ -41,12 +41,13 @@ func (h *AuctionHandler) CreateSellerAuction(c *fiber.Ctx) error {
 	req := dto.CreateAuctionRequest{
 		Title:           c.FormValue("title"),
 		Category:        c.FormValue("category"),
-		Condition:       c.FormValue("condition"),
 		Description:     c.FormValue("description"),
 		StartPrice:      startPrice,
 		BidStep:         bidStep,
 		EndAt:           c.FormValue("end_at"),
 		AllowEarlyClose: strings.EqualFold(strings.TrimSpace(c.FormValue("allow_early_close")), "true"),
+		AutoRenew:       strings.EqualFold(strings.TrimSpace(c.FormValue("auto_renew")), "true"),
+		AllowBidCancel:  strings.EqualFold(strings.TrimSpace(c.FormValue("allow_bid_cancel")), "true"),
 		BuyNowPrice:     buyNow,
 	}
 
@@ -88,6 +89,9 @@ func (h *AuctionHandler) CreateSellerAuction(c *fiber.Ctx) error {
 
 	result, err := h.svc.CreateSellerAuction(c.Context(), sellerID, req, imagePaths)
 	if err != nil {
+		if errors.Is(err, service.ErrPostingBanned) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"message": "บัญชีถูกระงับการลงประกาศใหม่"})
+		}
 		msg := err.Error()
 		if strings.Contains(msg, "invalid category") ||
 			strings.Contains(msg, "maximum ") ||
@@ -131,8 +135,12 @@ func (h *AuctionHandler) ListSellerAuctions(c *fiber.Ctx) error {
 	}
 	q := strings.TrimSpace(c.Query("q"))
 	sort := strings.TrimSpace(c.Query("sort"))
+	order := strings.TrimSpace(c.Query("order"))
+	if order != "asc" {
+		order = "desc"
+	}
 
-	result, err := h.svc.ListSellerAuctions(c.Context(), sellerID, scope, q, sort, limit, offset)
+	result, err := h.svc.ListSellerAuctions(c.Context(), sellerID, scope, q, sort, order, limit, offset)
 	if err != nil {
 		return responseInternalError(c, err)
 	}
@@ -162,7 +170,7 @@ func (h *AuctionHandler) ReopenSellerAuction(c *fiber.Ctx) error {
 		if strings.Contains(strings.ToLower(err.Error()), "auction not found") {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"message": err.Error()})
 		}
-		if strings.Contains(strings.ToLower(err.Error()), "invalid end_at") || strings.Contains(strings.ToLower(err.Error()), "end_at must be in the future") {
+		if strings.Contains(strings.ToLower(err.Error()), "invalid end_at") || strings.Contains(strings.ToLower(err.Error()), "end_at must be in the future") || strings.Contains(strings.ToLower(err.Error()), "end_at must be within") {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 		}
 		if strings.Contains(strings.ToLower(err.Error()), "insufficient credit") {

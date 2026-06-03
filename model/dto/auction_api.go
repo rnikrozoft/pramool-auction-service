@@ -11,9 +11,15 @@ type AuctionListItem struct {
 	TotalBids     int64  `json:"total_bids"`
 	BidderCount   int64  `json:"bidder_count"`
 	EndAt         string `json:"end_at"`
+	Status        string `json:"status"`
 	CoverImageURL   string `json:"cover_image_url"`
-	BuyNowPrice     int64  `json:"buy_now_price"`
-	AllowEarlyClose bool   `json:"allow_early_close"`
+	BuyNowPrice           int64   `json:"buy_now_price"`
+	AllowEarlyClose       bool    `json:"allow_early_close"`
+	AllowBidCancel        bool    `json:"allow_bid_cancel"`
+	SellerID              string  `json:"seller_id,omitempty"`
+	SellerDisplayName     string  `json:"seller_display_name,omitempty"`
+	SellerReviewAvgRating float64 `json:"seller_review_avg_rating,omitempty"`
+	SellerReviewCount     int     `json:"seller_review_count,omitempty"`
 }
 
 // AuctionListResponse is the JSON body for GET /auctions.
@@ -30,7 +36,6 @@ type AuctionDetailResponse struct {
 	WinnerID              string   `json:"winner_id"`
 	Title                 string   `json:"title"`
 	Category              string   `json:"category"`
-	Condition             string   `json:"condition"`
 	Description           string   `json:"description"`
 	StartPrice            int64    `json:"start_price"`
 	CurrentBid            int64    `json:"current_bid"`
@@ -39,10 +44,17 @@ type AuctionDetailResponse struct {
 	Status                string   `json:"status"`
 	EndAt                 string   `json:"end_at"`
 	AllowEarlyClose       bool     `json:"allow_early_close"`
+	AllowBidCancel        bool     `json:"allow_bid_cancel"`
+	AutoRenew             bool     `json:"auto_renew"`
 	ReopenEligible        bool     `json:"reopen_eligible"`
 	CoverImageURL         string   `json:"cover_image_url"`
 	Images                []string `json:"images"`
 	SellerShippedAt         string `json:"seller_shipped_at,omitempty"`
+	CarrierCode             string `json:"carrier_code,omitempty"`
+	CarrierName             string `json:"carrier_name,omitempty"`
+	TrackingNumber          string `json:"tracking_number,omitempty"`
+	ShipmentStatus          string `json:"shipment_status,omitempty"`
+	CanConfirmReceived      bool   `json:"can_confirm_received"`
 	BuyerReceivedAt         string `json:"buyer_received_at,omitempty"`
 	SellerPayoutAt          string `json:"seller_payout_at,omitempty"`
 	PendingSellerPayout     bool   `json:"pending_seller_payout"`
@@ -68,6 +80,15 @@ type PlaceBidResult struct {
 	EndAt string `json:"end_at,omitempty"`
 }
 
+type CancelBidResult struct {
+	AuctionID       string `json:"auction_id"`
+	RefundedBaht    int64  `json:"refunded_baht"`
+	ForfeitedBaht   int64  `json:"forfeited_baht"`
+	RemainingCredit int64  `json:"remaining_credit"`
+	CurrentBid      int64  `json:"current_bid"`
+	EndAt           string `json:"end_at"`
+}
+
 type CloseEarlyRequest struct {
 	Reason string `json:"reason"`
 }
@@ -87,7 +108,9 @@ type MyActiveBidItem struct {
 	EndAt              string `json:"end_at"`
 	AllowEarlyClose    bool   `json:"allow_early_close"`
 	CanConfirmReceived bool   `json:"can_confirm_received"`
+	ShipmentStatus     string `json:"shipment_status,omitempty"`
 	BiddingPausedUntil   string `json:"bidding_paused_until,omitempty"`
+	CreatedAt            string `json:"created_at"`
 }
 
 type MyActiveBidsResponse struct {
@@ -114,10 +137,18 @@ type MyBidHistoryItem struct {
 	MyHighestBid   int64  `json:"my_highest_bid"`
 	FinalPrice     int64  `json:"final_price"`
 	LastBidAt      string `json:"last_bid_at"`
+	EndAt          string `json:"end_at"`
 }
 
 type MyBidHistoryResponse struct {
-	Items  []MyBidHistoryItem `json:"items"`
-	Limit  int                `json:"limit"`
-	Offset int                `json:"offset"`
+	Items        []MyBidHistoryItem `json:"items"`
+	Total        int                `json:"total"`
+	AllCount     int                `json:"all_count"`
+	ActiveCount  int                `json:"active_count"`
+	OutbidCount  int                `json:"outbid_count"`
+	WonCount     int                `json:"won_count"`
+	LostCount    int                `json:"lost_count"`
+	Limit        int                `json:"limit"`
+	Offset       int                `json:"offset"`
+	Scope        string             `json:"scope"`
 }

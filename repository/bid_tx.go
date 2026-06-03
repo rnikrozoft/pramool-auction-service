@@ -29,6 +29,7 @@ func (r auctionRepo) UpdateAuctionOnBid(ctx context.Context, tx bun.Tx, auctionI
 		UPDATE auctions
 		SET current_bid = ?,
 			total_bids = total_bids + 1,
+			auto_renew = FALSE,
 			end_at = ?,
 			updated_at = NOW()
 		WHERE auction_id = ?
@@ -36,11 +37,11 @@ func (r auctionRepo) UpdateAuctionOnBid(ctx context.Context, tx bun.Tx, auctionI
 		  AND status = 'active'
 		  AND end_at > NOW()
 		  AND ? >= current_bid + bid_step
-		RETURNING auction_id, seller_id, title, category, item_condition, description,
+		RETURNING auction_id, seller_id, title, category, description,
 		          start_price, current_bid, bid_step, total_bids, status, end_at,
 		          COALESCE(buy_now_price, 0), cover_image_url
 	`, amount, newEndAt, auctionID, bidderID, amount).Scan(
-		&item.AuctionID, &item.SellerID, &item.Title, &item.Category, &item.Condition,
+		&item.AuctionID, &item.SellerID, &item.Title, &item.Category,
 		&item.Description, &item.StartPrice, &item.CurrentBid, &item.BidStep, &item.TotalBids,
 		&item.Status, &item.EndAt, &item.BuyNowPrice, &item.CoverImageURL,
 	)
@@ -51,6 +52,27 @@ func (r auctionRepo) UpdateAuctionOnBid(ctx context.Context, tx bun.Tx, auctionI
 		return nil, err
 	}
 	return item, nil
+}
+
+func (r auctionRepo) UpdateAuctionEndAtTx(ctx context.Context, tx bun.Tx, auctionID string, newEndAt time.Time) error {
+	res, err := tx.ExecContext(ctx, `
+		UPDATE auctions
+		SET end_at = ?, updated_at = NOW()
+		WHERE auction_id = ?
+		  AND status = 'active'
+		  AND end_at > NOW()
+	`, newEndAt, auctionID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrBidConflict
+	}
+	return nil
 }
 
 // UpsertAuctionBidLive keeps one row per bidder per auction while the listing is open (no per-click append).

@@ -3,12 +3,13 @@ package dto
 type CreateAuctionRequest struct {
 	Title           string `json:"title"`
 	Category        string `json:"category"`
-	Condition       string `json:"condition"`
 	Description     string `json:"description"`
 	StartPrice      int64  `json:"start_price"`
 	BidStep         int64  `json:"bid_step"`
 	EndAt           string `json:"end_at"`
 	AllowEarlyClose bool   `json:"allow_early_close"`
+	AllowBidCancel  bool   `json:"allow_bid_cancel"`
+	AutoRenew       bool   `json:"auto_renew"`
 	/** 0 = off; when highest bid reaches this amount, auction closes immediately. */
 	BuyNowPrice int64 `json:"buy_now_price"`
 }
@@ -42,16 +43,15 @@ type SellerAuctionItem struct {
 	CoverImageURL       string `json:"cover_image_url"`
 	BuyNowPrice         int64  `json:"buy_now_price"`
 	AllowEarlyClose     bool   `json:"allow_early_close"`
+	AllowBidCancel      bool   `json:"allow_bid_cancel"`
+	AutoRenew           bool   `json:"auto_renew"`
 	ReopenEligible      bool   `json:"reopen_eligible"`
 	PendingSellerPayout bool   `json:"pending_seller_payout"`
 	SellerShippedAt     string `json:"seller_shipped_at,omitempty"`
 	/** RFC3339 — ผู้ขายเริ่มปิดก่อนเวลา ยังไม่รับบิด */
 	BiddingPausedUntil string `json:"bidding_paused_until,omitempty"`
-	/** คะแนนดาวจากผู้ซื้อ (0.5–5) หลังยืนยันรับของ */
-	BuyerRating float64 `json:"buyer_rating,omitempty"`
-	/** คะแนนที่ผู้ขายได้จากรีวิว (= ดาว × 2) */
-	BuyerReviewPoints int `json:"buyer_review_points,omitempty"`
 	/** ชื่อผู้ชนะ — มีเมื่อปิดประมูลแล้วและมี winner_id */
 	WinnerDisplayName string `json:"winner_display_name,omitempty"`
 	WinnerID          string `json:"winner_id,omitempty"`
+	CreatedAt         string `json:"created_at"`
 }

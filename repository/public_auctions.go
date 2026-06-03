@@ -17,26 +17,37 @@ type PublicAuctionRow struct {
 	BidStep         int64     `bun:"bid_step"`
 	TotalBids       int64     `bun:"total_bids"`
 	EndAt           time.Time `bun:"end_at"`
+	Status          string    `bun:"status"`
 	CoverImageURL   string    `bun:"cover_image_url"`
 	BuyNowPrice     int64     `bun:"buy_now_price"`
 	AllowEarlyClose bool      `bun:"allow_early_close"`
-	CreatedAt       time.Time `bun:"created_at"`
-	BidderCount     int64     `bun:"bidder_count"`
+	AllowBidCancel  bool      `bun:"allow_bid_cancel"`
+	CreatedAt               time.Time `bun:"created_at"`
+	BidderCount             int64     `bun:"bidder_count"`
+	SellerID                string    `bun:"seller_id"`
+	SellerFirstName         string    `bun:"seller_first_name"`
+	SellerLastName          string    `bun:"seller_last_name"`
+	SellerReputationPoints  int64     `bun:"reputation_points"`
+	SellerReviewCount       int       `bun:"seller_review_count"`
 }
 
 // PublicAuctionFilter drives ListPublicAuctions / CountPublicAuctions.
 // MinPrice/MaxPrice apply to current_bid. MinStartPrice/MaxStartPrice to start_price.
-// MinBidStep/MaxBidStep to bid_step. EndFromDate/EndToDate are YYYY-MM-DD in Asia/Bangkok calendar for end_at.
+// MinBidStep/MaxBidStep to bid_step. MinSellerRating filters seller avg stars (0.5–5).
+// EndFromDate/EndToDate are YYYY-MM-DD in Asia/Bangkok calendar for end_at.
+// EndedScope: open = กำลังประมูล/ยังไม่ปิด, closed = ปิดแล้วและไม่มีผู้บิด, any = ทั้งสองแบบ
 type PublicAuctionFilter struct {
-	Query         string
-	Category      string
+	Query           string
+	Category        string
+	EndedScope      string // "", "open", "closed", "any"
 	MinPrice      *int64
 	MaxPrice      *int64
 	MinStartPrice *int64
 	MaxStartPrice *int64
-	MinBidStep    *int64
-	MaxBidStep    *int64
-	EndFromDate   string
+	MinBidStep       *int64
+	MaxBidStep       *int64
+	MinSellerRating  *float64 // 0.5–5 stars; requires seller with reviews
+	EndFromDate      string
 	EndToDate     string
 	Sort          string
 	Limit         int
@@ -64,9 +75,24 @@ func orderByPublicAuctions(sort string) string {
 	}
 }
 
+func publicAuctionFromClause(f PublicAuctionFilter, withBidStats bool) string {
+	var b strings.Builder
+	b.WriteString("FROM auctions a")
+	b.WriteString("\nLEFT JOIN users u ON u.user_id = a.seller_id")
+	if withBidStats {
+		b.WriteString(`
+LEFT JOIN LATERAL (
+	SELECT COUNT(DISTINCT b.bidder_user_id)::bigint AS cnt
+	FROM auction_bids b
+	WHERE b.auction_id = a.auction_id
+) bid_stats ON true`)
+	}
+	return b.String()
+}
+
 func (r auctionRepo) CountPublicAuctions(ctx context.Context, f PublicAuctionFilter) (int, error) {
 	q, args := buildPublicAuctionWhere(f)
-	query := "SELECT COUNT(*)::int FROM auctions a WHERE " + q
+	query := "SELECT COUNT(*)::int " + publicAuctionFromClause(f, false) + " WHERE " + q
 	var n int
 	err := r.bun.NewRaw(query, args...).Scan(ctx, &n)
 	return n, err
@@ -87,14 +113,7 @@ func (r auctionRepo) ListPublicAuctions(ctx context.Context, f PublicAuctionFilt
 		offset = 0
 	}
 
-	fromClause := `
-FROM auctions a
-LEFT JOIN LATERAL (
-	SELECT COUNT(DISTINCT b.bidder_user_id)::bigint AS cnt
-	FROM auction_bids b
-	WHERE b.auction_id = a.auction_id
-) bid_stats ON true
-WHERE ` + q
+	fromClause := publicAuctionFromClause(f, true) + "\nWHERE " + q
 
 	sqlStr := fmt.Sprintf(`
 SELECT
@@ -106,11 +125,18 @@ SELECT
 	a.bid_step,
 	a.total_bids,
 	a.end_at,
+	a.status,
 	a.cover_image_url,
 	COALESCE(a.buy_now_price, 0)::bigint AS buy_now_price,
 	COALESCE(a.allow_early_close, FALSE) AS allow_early_close,
+	COALESCE(a.allow_bid_cancel, FALSE) AS allow_bid_cancel,
 	a.created_at,
-	COALESCE(bid_stats.cnt, 0)::bigint AS bidder_count
+	COALESCE(bid_stats.cnt, 0)::bigint AS bidder_count,
+	a.seller_id,
+	COALESCE(u.first_name, '') AS seller_first_name,
+	COALESCE(u.last_name, '') AS seller_last_name,
+	COALESCE(u.reputation_points, 0)::bigint AS reputation_points,
+	COALESCE(u.seller_review_count, 0)::int AS seller_review_count
 %s
 ORDER BY %s
 LIMIT ? OFFSET ?
@@ -127,8 +153,16 @@ func buildPublicAuctionWhere(f PublicAuctionFilter) (string, []interface{}) {
 	var parts []string
 	var args []interface{}
 
-	parts = append(parts, "a.status = 'active'")
-	parts = append(parts, "a.end_at > NOW()")
+	switch strings.ToLower(strings.TrimSpace(f.EndedScope)) {
+	case "closed":
+		parts = append(parts, "NOT (a.status = 'active' AND a.end_at > NOW())")
+		parts = append(parts, "a.total_bids = 0")
+	case "any":
+		parts = append(parts, "a.status IN ('active', 'closed')")
+	default:
+		parts = append(parts, "a.status = 'active'")
+		parts = append(parts, "a.end_at > NOW()")
+	}
 
 	if cat := strings.TrimSpace(f.Category); cat != "" && cat != "ทั้งหมด" {
 		// รองรับ multiselect จาก query "cat1,cat2,..." และให้ match อย่างน้อยหนึ่งแท็ก
@@ -193,6 +227,11 @@ func buildPublicAuctionWhere(f PublicAuctionFilter) (string, []interface{}) {
 	if f.MaxBidStep != nil && *f.MaxBidStep > 0 {
 		parts = append(parts, "a.bid_step <= ?")
 		args = append(args, *f.MaxBidStep)
+	}
+
+	if f.MinSellerRating != nil && *f.MinSellerRating > 0 {
+		parts = append(parts, `COALESCE(u.seller_review_count, 0) > 0 AND GREATEST(COALESCE(u.reputation_points, 0)::float8 / u.seller_review_count::float8 / 2.0, 0) >= ?`)
+		args = append(args, *f.MinSellerRating)
 	}
 
 	if d := strings.TrimSpace(f.EndFromDate); d != "" {

@@ -7,7 +7,6 @@ type Auction struct {
 	SellerID             string    `db:"seller_id"`
 	Title                string    `db:"title"`
 	Category             string    `db:"category"`
-	Condition            string    `db:"item_condition"`
 	Description          string    `db:"description"`
 	StartPrice           int64     `db:"start_price"`
 	BidStep              int64     `db:"bid_step"`
@@ -18,12 +17,19 @@ type Auction struct {
 	Status               string    `db:"status"`
 	EndAt                time.Time `db:"end_at"`
 	AllowEarlyClose      bool      `db:"allow_early_close"`
+	AllowBidCancel       bool      `db:"allow_bid_cancel"`
+	AutoRenew            bool      `db:"auto_renew"`
+	AutoRenewCount       int64     `db:"auto_renew_count"`
 	EarlyCloseHoldAmount int64     `db:"early_close_hold_amount"`
 	/** 0 = disabled; when a bid amount reaches this, auction closes immediately. */
 	BuyNowPrice      int64      `db:"buy_now_price"`
 	CoverImageURL    string     `db:"cover_image_url"`
 	WinnerID         string     `db:"winner_id"`
 	SellerShippedAt  *time.Time `db:"seller_shipped_at"`
+	CarrierCode      string     `db:"carrier_code"`
+	CarrierName      string     `db:"carrier_name"`
+	TrackingNumber   string     `db:"tracking_number"`
+	ShipmentStatus   string     `db:"shipment_status"`
 	BuyerReceivedAt  *time.Time `db:"buyer_received_at"`
 	SellerPayoutAt   *time.Time `db:"seller_payout_at"`
 	PayoutEarlyClose bool       `db:"payout_early_close"`
